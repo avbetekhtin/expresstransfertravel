@@ -23,6 +23,17 @@ body{background:var(--paper);color:var(--ink)}.topline{background:#080c0e;color:
 .booking-card,.locations,.service,.driver-benefit,.modal-card{background:var(--card);border-color:var(--line)}.field input,.field select{background:#111719;border-color:#3b4446;color:var(--ink)}.field input::placeholder{color:#858c8b}.location{background:#13191b;border-color:#394143;color:var(--ink)}.location span{color:#a5aba9}.location:hover{background:#20292b;border-color:var(--gold)}.map-section{background:#151b1d}.map-legend{background:rgba(10,15,17,.9);color:var(--ink)}.map-legend span{color:#b3b8b5}.locations-intro{color:#a8aaa6}.footer{background:#080c0e}.footer p,.footer span{color:#a8aaa6}.footer a{color:#c8cbc6}.driver-reference{background:#111719;color:var(--ink)}.driver-reference-head p,.driver-reference-card p{color:#b7bbb8}.driver-reference-card h3{color:var(--ink)}.driver-reference-disclaimer{color:#b7bbb8}.driver-reference-icon{box-shadow:0 0 0 7px rgba(232,204,145,.14)}.driver-auth-card,.client-auth-card{color:var(--ink)}.auth-back{color:#a8aaa6}.modal{background:rgba(0,0,0,.72)}
 @media(max-width:720px){.brand img{width:290px;max-width:calc(100vw - 96px);max-height:84px}.nav{gap:6px}.nav-cta{padding:9px 10px}.header{background:rgba(16,20,22,.96)}.navlinks{background:var(--paper)!important;border-bottom:1px solid var(--line)}}
 @media(max-width:380px){.brand img{width:250px;max-width:calc(100vw - 90px)}}
+
+/* Compact responsive layout and high contrast controls */
+:root{--ink:#f5f1e8;--muted:#b8bdb9;--line:#3c4547}
+.booking-card,.locations,.service,.driver-benefit,.modal-card{color:#f5f1e8}
+.booking-card .field label,.driver-flow-card .field label,.client-auth-card .field label{color:#d8ddd8}
+.field input,.field select{padding:7px 8px;min-height:36px;color:#f5f1e8;background:#111719;border-color:#465154}
+.field input::placeholder{color:#9da5a1}.field select option{background:#111719;color:#f5f1e8}
+.booking-card{padding:14px;border-radius:18px}.form-grid{gap:9px}.field label{margin-bottom:4px}.form-bottom{margin-top:12px;gap:12px}
+.map-layout{grid-template-columns:minmax(0,1fr) minmax(330px,.8fr);gap:18px}.mapbox{min-height:0;height:auto;aspect-ratio:1701/902;border-radius:18px;background:transparent;border-color:#3c4547}.region-map-image{width:100%;height:100%;object-fit:contain;background:transparent}.locations{padding:14px;border-radius:18px}.locations .location-list{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;max-height:500px}.location{padding:8px 10px;min-height:38px;background:#13191b;color:#f5f1e8;border-color:#3c4547}.location b{color:#f5f1e8;font-size:13px}.location span{color:#b8bdb9;font-size:11px}.locations h3{margin-bottom:10px;font-size:26px}.locations-intro{margin:-3px 0 10px;color:#b8bdb9}
+.service,.feature,.driver-benefit{padding:14px}.service h3{margin:9px 0 4px}.feature h3{margin:12px 0 6px}.section{padding:58px 0}
+@media(max-width:720px){.map-layout{grid-template-columns:1fr;gap:14px}.mapbox{width:100%;aspect-ratio:1701/902}.locations .location-list{grid-template-columns:1fr;max-height:330px}.locations{padding:12px}.booking-card{padding:10px}.field input,.field select{padding:7px 8px;min-height:34px}.section{padding:42px 0}}
 </style></head>
 <body>
 <div class="topline"><div class="shell"><span>Премиальные поездки · 24/7 сопровождение</span><span>Калининград · Россия · Мир</span></div></div>
