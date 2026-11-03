@@ -1,0 +1,7 @@
+{
+  "name": "expresstransfertravel",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": { "nodemailer": "^7.0.3" }
+}
