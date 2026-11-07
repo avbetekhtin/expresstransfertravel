@@ -7,6 +7,7 @@ import nodemailer from 'nodemailer';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 8787);
+const testAuth = String(process.env.TEST_AUTH_MODE || 'false') === 'true';
 const codes = new Map();
 const dataDir = path.join(root, 'data');
 const usersFile = path.join(dataDir, 'test-users.json');
@@ -58,12 +59,13 @@ const server = http.createServer(async (req, res) => {
       const data = await body(req);
       const email = String(data.email || '').trim().toLowerCase();
       if (!/^\S+@\S+\.\S+$/.test(email)) return json(res, 400, { error: 'invalid_email' });
-      if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS || !process.env.MAIL_FROM) return json(res, 503, { error: 'smtp_not_configured' });
-      const code = String(crypto.randomInt(100000, 1000000));
+      const localDemo = testAuth && email.endsWith('@example.com');
+      if (!localDemo && (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS || !process.env.MAIL_FROM)) return json(res, 503, { error: 'smtp_not_configured' });
+      const code = localDemo ? '000000' : String(crypto.randomInt(100000, 1000000));
       const requestId = crypto.randomUUID();
       codes.set(requestId, { email, code, expires: Date.now() + 10 * 60_000 });
-      await transporter.sendMail({ from: process.env.MAIL_FROM, to: email, subject: 'Код подтверждения — Экспресс Трансфер Трэвел', text: `Ваш код подтверждения: ${code}. Код действует 10 минут.` });
-      return json(res, 200, { requestId });
+      if (!localDemo) await transporter.sendMail({ from: process.env.MAIL_FROM, to: email, subject: 'Код подтверждения — Экспресс Трансфер Трэвел', text: `Ваш код подтверждения: ${code}. Код действует 10 минут.` });
+      return json(res, 200, { requestId, testMode: localDemo });
     } catch (error) {
       console.error(error);
       return json(res, 502, { error: 'mail_delivery_failed' });
