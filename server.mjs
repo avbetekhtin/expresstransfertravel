@@ -14,6 +14,7 @@ const usersFile = path.join(dataDir, 'test-users.json');
 const ordersFile = path.join(dataDir, 'orders.json');
 const platformDbFile = path.join(dataDir, 'platform-db.json');
 const fixedDirectionsFile = path.join(dataDir, 'fixed-directions.json');
+const carClassificationFile = path.join(dataDir, 'car-classification.json');
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN || '';
 const telegramChatId = process.env.TELEGRAM_CHAT_ID || '';
 const osrmUrl = (process.env.OSRM_URL || 'http://localhost:5000').replace(/\/$/, '');
@@ -58,6 +59,11 @@ function writeOrders(data) { fs.writeFileSync(ordersFile, JSON.stringify(data, n
 function readPlatformDb() { return JSON.parse(fs.readFileSync(platformDbFile, 'utf8')); }
 function writePlatformDb(data) { fs.writeFileSync(platformDbFile, JSON.stringify(data, null, 2), 'utf8'); }
 function readFixedDirections() { return JSON.parse(fs.readFileSync(fixedDirectionsFile, 'utf8')); }
+function readCarClassification() { return JSON.parse(fs.readFileSync(carClassificationFile, 'utf8')); }
+function classifyCar(make, model) {
+  const text = `${make || ''} ${model || ''}`.toLowerCase();
+  return readCarClassification().find(item => item.models.toLowerCase().split(', ').some(brand => text.includes(brand.toLowerCase())))?.category || null;
+}
 
 async function notifyTelegram(order) {
   if (!telegramToken || !telegramChatId) return { sent: false, reason: 'telegram_not_configured' };
@@ -136,6 +142,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return json(res, 204, {});
   if (req.method === 'GET' && req.url === '/api/test-users') return json(res, 200, readUsers());
   if (req.method === 'GET' && req.url === '/api/orders') return json(res, 200, readOrders());
+  if (req.method === 'GET' && req.url === '/api/car-classification') return json(res, 200, readCarClassification());
   if (req.method === 'GET' && req.url === '/api/districts') return json(res, 200, readPlatformDb().districts);
   if (req.method === 'GET' && req.url === '/api/streets') return json(res, 200, readPlatformDb().streets);
   if (req.method === 'POST' && req.url === '/api/quote') {

@@ -1,0 +1,22 @@
+[
+  {
+    "category": "Эконом",
+    "description": "Бюджетные решения. Базовый комфорт, экономичность, доступные запчасти. Основа таксопарков и первого автомобиля.",
+    "models": "Lada\" (Granta"
+  },
+  {
+    "category": "Стандарт",
+    "description": "«Золотая середина». Баланс цены, оснащения, безопасности и стоимости владения. Самые популярные семейные и городские авто.",
+    "models": "Moskvich\" (3"
+  },
+  {
+    "category": "Комфорт",
+    "description": "Премиальные материалы, просторный салон, продвинутые мультимедиа, системы помощи водителю (ADAS), мощные двигатели.",
+    "models": "Exeed\" (TXL"
+  }
+]
+[
+  {"category":"Эконом","description":"Бюджетные решения. Базовый комфорт, экономичность, доступные запчасти.","models":"Lada, Chery, Geely, Changan, JAC, Kia, Hyundai, Renault, Nissan, Ravon"},
+  {"category":"Стандарт","description":"Баланс цены, оснащения, безопасности и стоимости владения.","models":"Moskvich, Haval, Omoda, Jetour, BAIC, FAW, Dongfeng, GAC, Kaiyi, Jaecoo, Geely, Chery, Kia, Hyundai, Volkswagen, Skoda, Toyota, Nissan, Mazda, Mitsubishi, Suzuki"},
+  {"category":"Комфорт","description":"Премиальные материалы, просторный салон и продвинутые системы помощи водителю.","models":"Exeed, Tank, Zeekr, Lixiang, Avatr, Voyah, Hongqi, Geely, Chery, Changan, Kia, Hyundai, Toyota, BMW, Mercedes-Benz, Audi, Volvo, Lexus, Genesis, Land Rover, Porsche"}
+]
