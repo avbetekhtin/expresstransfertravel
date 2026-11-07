@@ -8,6 +8,25 @@ import nodemailer from 'nodemailer';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 8787);
 const codes = new Map();
+const dataDir = path.join(root, 'data');
+const usersFile = path.join(dataDir, 'test-users.json');
+const seedUsers = {
+  drivers: [
+    { id: 'DRV-001', name: 'Иван Петров', city: 'Калининград', car: 'Mercedes-Benz E-Class', status: 'Проверен', tariffs: ['Аэропорт', 'Межгород'] },
+    { id: 'DRV-002', name: 'Анна Смирнова', city: 'Светлогорск', car: 'Mercedes-Benz V-Class', status: 'На проверке', tariffs: ['VIP-трансфер', 'Почасовая аренда'] },
+    { id: 'DRV-003', name: 'Михаил Волков', city: 'Зеленоградск', car: 'Toyota Camry', status: 'Проверен', tariffs: ['Городские поездки', 'Аэропорт'] }
+  ],
+  clients: [
+    { id: 'CLI-001', name: 'Алексей Морозов', email: 'alexey.test@example.com', phone: '+7 900 000-00-01', status: 'Активен' },
+    { id: 'CLI-002', name: 'Елена Орлова', email: 'elena.test@example.com', phone: '+7 900 000-00-02', status: 'Активен' },
+    { id: 'CLI-003', name: 'Дмитрий Соколов', email: 'dmitry.test@example.com', phone: '+7 900 000-00-03', status: 'Профиль заполнен' }
+  ]
+};
+
+fs.mkdirSync(dataDir, { recursive: true });
+if (!fs.existsSync(usersFile)) fs.writeFileSync(usersFile, JSON.stringify(seedUsers, null, 2), 'utf8');
+function readUsers() { return JSON.parse(fs.readFileSync(usersFile, 'utf8')); }
+function writeUsers(data) { fs.writeFileSync(usersFile, JSON.stringify(data, null, 2), 'utf8'); }
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -32,6 +51,8 @@ function body(req) {
 
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return json(res, 204, {});
+  if (req.method === 'GET' && req.url === '/api/test-users') return json(res, 200, readUsers());
+  if (req.method === 'POST' && req.url === '/api/test-users/reset') { writeUsers(seedUsers); return json(res, 200, readUsers()); }
   if (req.method === 'POST' && (req.url === '/api/auth/register' || req.url === '/api/auth/client/register')) {
     try {
       const data = await body(req);

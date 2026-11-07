@@ -1,0 +1,60 @@
+{
+  "drivers": [
+    {
+      "id": "DRV-001",
+      "name": "Иван Петров",
+      "city": "Калининград",
+      "car": "Mercedes-Benz E-Class",
+      "status": "Проверен",
+      "tariffs": [
+        "Аэропорт",
+        "Межгород"
+      ]
+    },
+    {
+      "id": "DRV-002",
+      "name": "Анна Смирнова",
+      "city": "Светлогорск",
+      "car": "Mercedes-Benz V-Class",
+      "status": "На проверке",
+      "tariffs": [
+        "VIP-трансфер",
+        "Почасовая аренда"
+      ]
+    },
+    {
+      "id": "DRV-003",
+      "name": "Михаил Волков",
+      "city": "Зеленоградск",
+      "car": "Toyota Camry",
+      "status": "Проверен",
+      "tariffs": [
+        "Городские поездки",
+        "Аэропорт"
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "id": "CLI-001",
+      "name": "Алексей Морозов",
+      "email": "alexey.test@example.com",
+      "phone": "+7 900 000-00-01",
+      "status": "Активен"
+    },
+    {
+      "id": "CLI-002",
+      "name": "Елена Орлова",
+      "email": "elena.test@example.com",
+      "phone": "+7 900 000-00-02",
+      "status": "Активен"
+    },
+    {
+      "id": "CLI-003",
+      "name": "Дмитрий Соколов",
+      "email": "dmitry.test@example.com",
+      "phone": "+7 900 000-00-03",
+      "status": "Профиль заполнен"
+    }
+  ]
+}
