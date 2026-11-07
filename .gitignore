@@ -1,4 +1,8 @@
 node_modules/
+.env
+data/orders.json
 .playwright-mcp/
 .env
 *.log
+osrm/*.osm.pbf
+osrm/*.osrm*

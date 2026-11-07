@@ -1,0 +1,10 @@
+services:
+  osrm:
+    image: ghcr.io/project-osrm/osrm-backend:latest
+    container_name: ett-osrm
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./osrm:/data
+    command: osrm-routed --algorithm mld /data/kaliningradskaya-latest.osrm
+    restart: unless-stopped

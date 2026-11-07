@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-11-07",
+  "drivers": [],
+  "clients": [],
+  "districts": [
+    { "id": "central", "name": "Центральный район", "tripPriceRub": null },
+    { "id": "moscow", "name": "Московский район", "tripPriceRub": null },
+    { "id": "leningrad", "name": "Ленинградский район", "tripPriceRub": null },
+    { "id": "october", "name": "Октябрьский район", "tripPriceRub": null }
+  ],
+  "streets": [],
+  "orders": []
+}
