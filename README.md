@@ -95,6 +95,8 @@ npm start
 
 После назначения машины через `POST /api/orders/:id/assign` сервер отправляет в Telegram маршрут, дату, клиента, автомобиль и водителя. Никогда не публикуйте токен в HTML, Git или чате.
 
+При том же назначении сервер отправляет email клиенту и, если у водителя сохранён email, водителю. Результат сохраняется в `order.emailNotifications`; доставка не отменяет назначение при недоступном SMTP. Production SMTP требует `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS` и `MAIL_FROM`. Для локальной проверки формирования письма можно задать `SMTP_JSON_TRANSPORT=true`; это не доставляет письмо во внешний почтовый ящик.
+
 События назначения и завершения записываются в таблицу `telegram_events`; доставка выполняется максимум в 3 попытки. Для раздельных уведомлений задайте `TELEGRAM_CLIENT_CHAT_ID`, `TELEGRAM_DRIVER_CHAT_ID`, `TELEGRAM_DISPATCHER_CHAT_ID`, `TELEGRAM_ADMIN_CHAT_ID`; старый `TELEGRAM_CHAT_ID` остаётся совместимым общим fallback. Staff может просматривать журнал через `GET /api/telegram/events` и повторять неудачное событие через `POST /api/telegram/events/:id/retry`.
 
 ## Маршруты и расчёт

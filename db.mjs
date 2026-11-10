@@ -181,7 +181,7 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
         FROM users ORDER BY role, name`).all();
     },
     findDriverVehicle(driverId, plate) {
-      return db.prepare(`SELECT u.id, u.full_name AS name, u.status, v.id AS vehicleId, v.make, v.model,
+      return db.prepare(`SELECT u.id, u.full_name AS name, u.email, u.status, v.id AS vehicleId, v.make, v.model,
         v.plate, v.car_class AS carClass, v.status AS vehicleStatus
         FROM users u JOIN vehicles v ON v.driver_id=u.id
         WHERE u.id=? AND u.role='driver' AND upper(v.plate)=upper(?)`).get(driverId, plate);

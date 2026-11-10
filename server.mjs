@@ -202,12 +202,42 @@ async function calculateOsrmCoordinates(a, b, from, to) {
   return { available: true, provider: 'osrm', distanceKm, durationMin: Math.round(route.duration / 60), basePriceRub, commissionRub, clientTotalRub: basePriceRub + commissionRub, pricingRule: 'distance_km * 75 RUB + 20% platform commission', from, to };
 }
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT || 465),
-  secure: String(process.env.SMTP_SECURE || 'true') !== 'false',
-  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-});
+const transporter = process.env.SMTP_JSON_TRANSPORT === 'true'
+  ? nodemailer.createTransport({ jsonTransport: true })
+  : nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 465),
+    secure: String(process.env.SMTP_SECURE || 'true') !== 'false',
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    connectionTimeout: 8000,
+    greetingTimeout: 8000,
+    socketTimeout: 8000
+  });
+
+const mailConfigured = process.env.SMTP_JSON_TRANSPORT === 'true' || Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.MAIL_FROM);
+
+async function notifyAssignmentEmail(order, recipient, audience) {
+  if (!recipient) return { sent: false, reason: 'recipient_not_configured' };
+  if (!mailConfigured) return { sent: false, reason: 'smtp_not_configured' };
+  const subject = audience === 'driver' ? `Новый заказ ${order.id} — автомобиль назначен` : `Заказ ${order.id} — автомобиль назначен`;
+  const text = [
+    audience === 'driver' ? 'Вам назначен заказ.' : 'Ваш заказ подтверждён назначением автомобиля.',
+    `Заказ: ${order.id}`,
+    `Маршрут: ${order.from} → ${order.to}`,
+    `Дата и время: ${order.date || 'не указано'} ${order.time || ''}`,
+    `Автомобиль: ${order.vehicle}`,
+    `Гос. номер: ${order.vehiclePlate}`,
+    `Водитель: ${order.driverName || order.driverId || 'не указан'}`,
+    audience === 'client' ? `Оплатить комиссию необходимо до: ${order.paymentDeadline}` : ''
+  ].filter(Boolean).join('\n');
+  try {
+    await transporter.sendMail({ from: process.env.MAIL_FROM, to: recipient, subject, text });
+    return { sent: true, recipient: recipient.replace(/(.{2}).+(@.*)/, '$1***$2') };
+  } catch (error) {
+    console.error('assignment_email_delivery_failed', String(error.message).slice(0, 120));
+    return { sent: false, reason: 'email_delivery_failed' };
+  }
+}
 
 function json(res, status, body, headers = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
@@ -442,7 +472,10 @@ async function handleRequest(req, res) {
       }
       let telegram = { sent: false, reason: 'telegram_not_configured' };
       try { telegram = await notifyAssignment(order); } catch (error) { console.error(error); telegram = { sent: false, reason: 'telegram_delivery_failed' }; }
-      order.telegram = telegram; writeOrders(orders); audit(req, actor, 'order.assign', 'order', order.id, { driverId: order.driverId, vehiclePlate: order.vehiclePlate }); return json(res, 200, order);
+      const clientEmail = await notifyAssignmentEmail(order, order.clientEmail, 'client');
+      const driverEmail = await notifyAssignmentEmail(order, vehicle.email, 'driver');
+      order.telegram = telegram; order.emailNotifications = { client: clientEmail, driver: driverEmail };
+      writeOrders(orders); audit(req, actor, 'order.assign', 'order', order.id, { driverId: order.driverId, vehiclePlate: order.vehiclePlate, emailClientSent: clientEmail.sent, emailDriverSent: driverEmail.sent }); return json(res, 200, order);
     } catch { return json(res, 400, { error: 'invalid_request' }); }
   }
   if (req.method === 'POST' && req.url === '/api/test-users/reset') {
