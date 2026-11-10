@@ -232,7 +232,7 @@ async function notifyAssignmentEmail(order, recipient, audience) {
   ].filter(Boolean).join('\n');
   try {
     await transporter.sendMail({ from: process.env.MAIL_FROM, to: recipient, subject, text });
-    return { sent: true, recipient: recipient.replace(/(.{2}).+(@.*)/, '$1***$2') };
+    return { sent: process.env.SMTP_JSON_TRANSPORT !== 'true', generated: true, transport: process.env.SMTP_JSON_TRANSPORT === 'true' ? 'json' : 'smtp', recipient: recipient.replace(/(.{2}).+(@.*)/, '$1***$2') };
   } catch (error) {
     console.error('assignment_email_delivery_failed', String(error.message).slice(0, 120));
     return { sent: false, reason: 'email_delivery_failed' };
