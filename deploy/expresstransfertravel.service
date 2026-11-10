@@ -1,0 +1,25 @@
+[Unit]
+Description=Express Transfer Travel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ett
+Group=ett
+WorkingDirectory=/opt/expresstransfertravel
+EnvironmentFile=/etc/expresstransfertravel.env
+ExecStart=/usr/bin/node /opt/expresstransfertravel/server.mjs
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/expresstransfertravel
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

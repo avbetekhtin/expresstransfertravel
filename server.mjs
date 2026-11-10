@@ -8,6 +8,9 @@ import { createDatabase } from './db.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 8787);
+const publicOrigin = process.env.PUBLIC_ORIGIN ? new URL(process.env.PUBLIC_ORIGIN).origin : null;
+const indexable = Boolean(publicOrigin && process.env.NODE_ENV === 'production' && process.env.SITE_INDEXABLE === 'true');
+const htmlEscape = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const testAuth = String(process.env.TEST_AUTH_MODE || 'false') === 'true';
 const codes = new Map();
 const sessionTtlMs = 7 * 24 * 60 * 60_000;
@@ -315,6 +318,27 @@ async function handleRequest(req, res) {
   if (!checkRateLimit(req, res)) return;
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && !sameOrigin(req)) return json(res, 403, { error: 'origin_not_allowed' });
   if (req.method === 'OPTIONS') return json(res, 204, {});
+  const requestedPath = new URL(req.url, 'http://localhost').pathname;
+  if (req.method === 'GET' && requestedPath === '/robots.txt') {
+    res.setHeader('Content-Type','text/plain; charset=utf-8');
+    return res.end(indexable ? `User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /dispatcher.html\nDisallow: /test-admin.html\nSitemap: ${publicOrigin}/sitemap.xml\n` : 'User-agent: *\nDisallow: /\n');
+  }
+  if (req.method === 'GET' && requestedPath === '/sitemap.xml') {
+    if (!indexable) return json(res, 404, { error: 'site_not_published' });
+    res.setHeader('Content-Type','application/xml; charset=utf-8');
+    return res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${htmlEscape(publicOrigin)}/</loc></url></urlset>`);
+  }
+  if (req.method === 'GET' && requestedPath === '/healthz') return json(res, 200, { status:'ok' });
+  if (req.method === 'GET' && requestedPath === '/index.html') { res.writeHead(301, {Location:'/'}); return res.end(); }
+  if (req.method === 'GET' && requestedPath === '/') {
+    let html = fs.readFileSync(path.join(root,'index.html'),'utf8');
+    const seo = publicOrigin ? `<link rel="canonical" href="${htmlEscape(publicOrigin)}/"><meta property="og:url" content="${htmlEscape(publicOrigin)}/"><meta property="og:type" content="website"><meta property="og:locale" content="ru_RU"><meta property="og:title" content="Трансферы в Калининграде — ЭКСПРЕССТРАНСФЕРТРЭВЕЛ"><meta property="og:description" content="Трансферы из аэропорта Храброво, поездки по Калининградской области."><meta property="og:image" content="${htmlEscape(publicOrigin)}/logo.png"><meta name="twitter:card" content="summary"><script type="application/ld+json">${JSON.stringify({'@context':'https://schema.org','@type':'Service',name:'Трансферы в Калининграде',serviceType:'Индивидуальный трансфер',areaServed:'Калининградская область',url:publicOrigin+'/'}).replaceAll('<','\\u003c')}</script>` : '';
+    html = html.replace('<!-- PUBLIC_SEO -->',seo);
+    if (indexable) html=html.replace('noindex,nofollow','index,follow,max-image-preview:large');
+    const contacts = [process.env.CONTACT_PHONE ? `<a href="tel:${htmlEscape(process.env.CONTACT_PHONE)}">${htmlEscape(process.env.CONTACT_PHONE)}</a>` : '',process.env.CONTACT_EMAIL ? `<a href="mailto:${htmlEscape(process.env.CONTACT_EMAIL)}">${htmlEscape(process.env.CONTACT_EMAIL)}</a>` : ''].join('');
+    html=html.replace('<!-- PUBLIC_CONTACTS -->',contacts);
+    res.setHeader('Content-Type','text/html; charset=utf-8'); return res.end(html);
+  }
   if (req.method === 'GET' && req.url === '/api/test-users') return testAuth ? json(res, 200, readUsers()) : json(res, 404, { error: 'not_found' });
   if (req.method === 'GET' && req.url === '/api/users') {
     if (!requireRole(req, res, ['admin', 'dispatcher'])) return;
@@ -429,6 +453,14 @@ async function handleRequest(req, res) {
       const order = { ...fields, clientEmail: actor.email, clientName: actor.name, notificationChannels: actor.notificationChannels || ['email'], telegramHandle: actor.telegram_handle || null, maxHandle: actor.max_handle || null, id: `ORD-${crypto.randomUUID()}`, status: 'Новый', paymentStatus: 'Ожидает оплаты комиссии', commissionRate: platformCommissionRate, paymentDeadlineMinutes: 10, createdAt: new Date().toISOString(), ...(route?.available ? { routeDistanceKm: route.distanceKm, routeDurationMin: route.durationMin, basePriceRub: route.basePriceRub, commissionRub: route.commissionRub, clientTotalRub: route.clientTotalRub, pricingRule: route.pricingRule } : {}) };
       const orders = readOrders(); orders.push(order); writeOrders(orders); audit(req, actor, 'order.create', 'order', order.id, { from: order.from, to: order.to });
       return json(res, 201, order);
+    } catch { return json(res, 400, { error: 'invalid_request' }); }
+  }
+  if (req.method === 'POST' && req.url === '/api/inquiries') {
+    try {
+      const data = await body(req); const name = String(data.name || '').trim().slice(0, 120); const phone = String(data.phone || '').trim().slice(0, 40);
+      if (!name || !/^\+?[0-9 ()-]{7,25}$/.test(phone)) return json(res, 400, { error: 'invalid_contact' });
+      audit(req, currentUser(req), 'inquiry.create', 'inquiry', null, { name, phone });
+      return json(res, 201, { accepted: true });
     } catch { return json(res, 400, { error: 'invalid_request' }); }
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/accept')) {
@@ -603,7 +635,8 @@ async function handleRequest(req, res) {
   if (req.method === 'GET') {
     const file = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
     const relative = file === '/' ? 'index.html' : file.slice(1);
-    const allowed = ['index.html','dispatcher.html','test-admin.html','logo.png','kaliningrad-region-map.png'].includes(relative) || relative.startsWith('assets/') || relative.startsWith('css/');
+    const allowed = ['dispatcher.html','test-admin.html','logo.png','kaliningrad-region-map.png','favicon.svg'].includes(relative) || relative.startsWith('assets/') || relative.startsWith('css/');
+    if (relative === 'test-admin.html' && !testAuth) return json(res,404,{error:'not_found'});
     const filePath = path.resolve(root, relative);
     if (allowed && filePath.startsWith(root + path.sep) && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
       const mime = { '.html':'text/html; charset=utf-8', '.css':'text/css', '.png':'image/png', '.svg':'image/svg+xml' }[path.extname(filePath)] || 'application/octet-stream';
@@ -615,6 +648,7 @@ async function handleRequest(req, res) {
 
 if (process.env.NODE_ENV === 'production' && testAuth) throw new Error('test_auth_forbidden_in_production');
 const server = http.createServer((req, res) => {
+  if (req.url?.startsWith('/api/') || req.url?.includes('dispatcher') || !indexable) res.setHeader('X-Robots-Tag','noindex, nofollow');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');

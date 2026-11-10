@@ -4,8 +4,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const source = path.join(root, 'data', 'platform.sqlite');
-const backupDir = path.join(root, 'backups');
+const source = path.join(path.resolve(process.env.DATA_DIR || path.join(root, 'data')), 'platform.sqlite');
+const backupDir = path.resolve(process.env.BACKUP_DIR || path.join(root, 'backups'));
 fs.mkdirSync(backupDir, { recursive: true });
 if (!fs.existsSync(source)) throw new Error('database_not_found');
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');

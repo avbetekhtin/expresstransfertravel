@@ -7,5 +7,7 @@ data/driver-documents/
 .playwright-mcp/
 .env
 *.log
+deploy/generated/
+qa-artifacts/
 osrm/*.osm.pbf
 osrm/*.osrm*
