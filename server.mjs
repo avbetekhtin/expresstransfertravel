@@ -324,6 +324,13 @@ async function handleRequest(req, res) {
     if (!requireRole(req, res, ['admin'])) return;
     return json(res, 200, { events: database.listAudit() });
   }
+  if (req.method === 'GET' && req.url === '/api/notifications/health') {
+    if (!requireRole(req, res, ['admin'])) return;
+    const checks = { telegram: { configured: Boolean(telegramToken && Object.values(telegramChats).some(Boolean)) }, max: { configured: Boolean(maxBotToken && Object.values(maxChats).some(Boolean)) } };
+    if (checks.telegram.configured) { try { const r = await fetch(`https://api.telegram.org/bot${telegramToken}/getMe`, { signal: AbortSignal.timeout(5000) }); checks.telegram.apiStatus = r.status; checks.telegram.valid = r.ok; } catch { checks.telegram.valid = false; } }
+    if (checks.max.configured) { try { const r = await fetch('https://platform-api.max.ru/me', { headers: { Authorization: maxBotToken }, signal: AbortSignal.timeout(5000) }); checks.max.apiStatus = r.status; checks.max.valid = r.ok; } catch { checks.max.valid = false; } }
+    return json(res, 200, { checks });
+  }
   if (req.method === 'PATCH' && req.url === '/api/auth/notification-profile') {
     const actor = requireRole(req, res, ['client']); if (!actor) return;
     try {
