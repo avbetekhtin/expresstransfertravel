@@ -23,6 +23,7 @@ const telegramChatId = process.env.TELEGRAM_CHAT_ID || '';
 const osrmUrl = (process.env.OSRM_URL || 'http://localhost:5000').replace(/\/$/, '');
 const distanceRateRub = 75;
 const platformCommissionRate = 0.2;
+const osrmTimeoutMs = Number(process.env.OSRM_TIMEOUT_MS || 8000);
 const knownPlaces = {
   'Калининград': [54.7104, 20.4522], 'Светлогорск': [54.9438, 20.1514], 'Зеленоградск': [54.9581, 20.4759], 'Советск': [55.0810, 21.8886], 'Черняховск': [54.6311, 21.8156], 'Гурьевск': [54.7717, 20.6032], 'Гусев': [54.5922, 22.1947], 'Балтийск': [54.6514, 19.9142], 'Светлый': [54.6750, 20.1347], 'Янтарный': [54.8710, 19.9380], 'Куршская коса': [55.1700, 20.8500], 'п. Лесной': [55.0200, 20.8700], 'п. Морской': [55.1300, 20.7700], 'п. Рыбачий': [55.1500, 20.8000], 'дюна Эфа': [55.2340, 20.9130], 'Танцующий лес': [55.1740, 20.8530], 'Аэропорт Храброво': [54.8900, 20.5920]
 };
@@ -94,6 +95,22 @@ function requireRole(req, res, roles) {
   return user;
 }
 
+function normalizePlace(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function geocodePlace(value) {
+  const normalized = normalizePlace(value);
+  const entry = Object.entries(knownPlaces).find(([name]) => normalizePlace(name) === normalized);
+  return entry ? { name: entry[0], lat: entry[1][0], lon: entry[1][1], source: 'local-known-places' } : null;
+}
+
+function validateCoordinates(point) {
+  if (!Array.isArray(point) || point.length !== 2) return false;
+  const [lat, lon] = point.map(Number);
+  return Number.isFinite(lat) && Number.isFinite(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
+}
+
 async function notifyTelegram(order) {
   if (!telegramToken || !telegramChatId) return { sent: false, reason: 'telegram_not_configured' };
   const text = [
@@ -126,20 +143,22 @@ async function notifyTripReport(order) {
 
 async function calculateOsrmRoute(from, to) {
   const fixed = readFixedDirections();
-  const fixedKey = `${String(from).trim().toLowerCase()}→${String(to).trim().toLowerCase()}`;
+  const fromPlace = geocodePlace(from);
+  const toPlace = geocodePlace(to);
+  const fixedKey = `${normalizePlace(from)}→${normalizePlace(to)}`;
   const fixedPrice = database.findTariff(fixedKey);
-  if (fixedPrice) return { available: true, provider: 'fixed-table', pricing: 'fixed', from, to, basePriceRub: fixedPrice.standard, commissionRub: Math.round(fixedPrice.standard * platformCommissionRate), clientTotalRub: fixedPrice.standard + Math.round(fixedPrice.standard * platformCommissionRate), prices: fixedPrice, pricingRule: 'fixed price from Excel + 20% platform commission' };
-  if (fixed.directions.includes(to)) return { available: false, reason: 'fixed_price_not_set', pricing: 'fixed', from, to };
-  const a = knownPlaces[from]; const b = knownPlaces[to];
-  if (!a || !b) return { available: false, reason: 'place_not_in_directory', from, to };
-  return calculateOsrmCoordinates(a, b, from, to);
+  if (fixedPrice) return { available: true, provider: 'fixed-table', pricing: 'fixed', from: fromPlace?.name || String(from).trim(), to: toPlace?.name || String(to).trim(), basePriceRub: fixedPrice.standard, commissionRub: Math.round(fixedPrice.standard * platformCommissionRate), clientTotalRub: fixedPrice.standard + Math.round(fixedPrice.standard * platformCommissionRate), prices: fixedPrice, pricingRule: 'fixed price from Excel + 20% platform commission' };
+  if (fixed.directions.some(direction => normalizePlace(direction) === normalizePlace(to))) return { available: false, reason: 'fixed_price_not_set', pricing: 'fixed', from, to };
+  if (!fromPlace || !toPlace) return { available: false, reason: 'place_not_in_directory', from, to };
+  return calculateOsrmCoordinates([fromPlace.lat, fromPlace.lon], [toPlace.lat, toPlace.lon], fromPlace.name, toPlace.name);
 }
 
 async function calculateOsrmCoordinates(a, b, from, to) {
+  if (!validateCoordinates(a) || !validateCoordinates(b)) throw new Error('invalid_coordinates');
   const url = `${osrmUrl}/route/v1/driving/${a[1]},${a[0]};${b[1]},${b[0]}?overview=false&steps=false`;
-  const response = await fetch(url); if (!response.ok) throw new Error(`osrm_${response.status}`);
+  const response = await fetch(url, { signal: AbortSignal.timeout(osrmTimeoutMs) }); if (!response.ok) throw new Error(`osrm_${response.status}`);
   const data = await response.json(); const route = data.routes?.[0];
-  if (!route) throw new Error('osrm_route_not_found');
+  if (!route || !Number.isFinite(Number(route.distance)) || !Number.isFinite(Number(route.duration))) throw new Error('osrm_route_not_found');
   const distanceKm = Math.round(route.distance / 100) / 10;
   const basePriceRub = Math.round(distanceKm * distanceRateRub);
   const commissionRub = Math.round(basePriceRub * platformCommissionRate);
@@ -175,6 +194,16 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { users: database.listUsers() });
   }
   if (req.method === 'GET' && req.url === '/api/tariffs') return json(res, 200, { tariffs: database.listTariffs(), directions: database.listDirections() });
+  if (req.method === 'GET' && req.url.startsWith('/api/geocode?')) {
+    const query = new URL(req.url, `http://${req.headers.host}`); const place = geocodePlace(query.searchParams.get('q'));
+    return place ? json(res, 200, { available: true, result: place }) : json(res, 404, { available: false, error: 'place_not_found' });
+  }
+  if (req.method === 'GET' && req.url === '/api/route/health') {
+    try {
+      const response = await fetch(`${osrmUrl}/route/v1/driving/20.4522,54.7104;20.4759,54.9581?overview=false&steps=false`, { signal: AbortSignal.timeout(osrmTimeoutMs) });
+      return json(res, response.ok ? 200 : 503, { available: response.ok, provider: 'osrm', status: response.status });
+    } catch { return json(res, 503, { available: false, provider: 'osrm', error: 'osrm_unreachable' }); }
+  }
   if (req.method === 'POST' && req.url === '/api/admin/tariffs/import') {
     if (!requireRole(req, res, ['admin', 'dispatcher'])) return;
     try {
@@ -211,7 +240,7 @@ const server = http.createServer(async (req, res) => {
       let route = null;
       try {
         route = data.fromLat != null && data.fromLon != null && data.toLat != null && data.toLon != null
-          ? await calculateOsrmCoordinates([Number(data.fromLat), Number(data.fromLon)], [Number(data.toLat), Number(data.toLon)], data.from, data.to)
+          ? await calculateOsrmCoordinates([Number(data.fromLat), Number(data.fromLon)], [Number(data.toLat), Number(data.toLon)], String(data.from).trim(), String(data.to).trim())
           : await calculateOsrmRoute(data.from, data.to);
       } catch { route = null; }
       const order = { id: `ORD-${Date.now().toString(36).toUpperCase()}`, status: 'Новый', paymentStatus: 'Ожидает оплаты комиссии', commissionRate: platformCommissionRate, paymentDeadlineMinutes: 10, createdAt: new Date().toISOString(), ...(route?.available ? { routeDistanceKm: route.distanceKm, routeDurationMin: route.durationMin, basePriceRub: route.basePriceRub, commissionRub: route.commissionRub, clientTotalRub: route.clientTotalRub, pricingRule: route.pricingRule } : {}), ...data };
