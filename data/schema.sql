@@ -14,6 +14,9 @@ CREATE TABLE IF NOT EXISTS users (
   tariffs_json TEXT NOT NULL DEFAULT '[]',
   password_hash TEXT,
   verified_at TEXT,
+  notification_channels_json TEXT NOT NULL DEFAULT '["email"]',
+  telegram_handle TEXT,
+  max_handle TEXT,
   created_at TEXT NOT NULL
 );
 

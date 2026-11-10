@@ -32,7 +32,7 @@ npm start
 
 ## Пользователи и роли
 
-Регистрация: `POST /api/auth/client/register` или `POST /api/auth/register` с `email`, `name`, `phone`, `password` и ролью `client`/`driver`. После подтверждения кода вход выполняется через `POST /api/auth/login`; сессия хранится в HttpOnly-cookie. Текущий профиль доступен через `GET /api/auth/me`. Список пользователей доступен только ролям `admin` и `dispatcher` через `GET /api/users`.
+Регистрация: `POST /api/auth/client/register` или `POST /api/auth/register` с `email`, `name`, `phone`, `password` и ролью `client`/`driver`. Клиент может передать `channels: ["email", "telegram", "max"]`, а также `telegramHandle` и `maxHandle`; настройки позже изменяются через `PATCH /api/auth/notification-profile`. После подтверждения кода вход выполняется через `POST /api/auth/login`; сессия хранится в HttpOnly-cookie. Текущий профиль доступен через `GET /api/auth/me`. Список пользователей доступен только ролям `admin` и `dispatcher` через `GET /api/users`.
 
 Локальный `TEST_AUTH_MODE=true` разрешает адреса `@example.com` с кодом `000000`; в этом режиме также доступны тестовые `/api/test-users` и `/api/test-users/reset`. Это режим проверки и не заменяет SMTP-аутентификацию production.
 

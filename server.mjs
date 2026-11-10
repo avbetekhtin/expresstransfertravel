@@ -104,7 +104,7 @@ function currentUser(req) {
 
 function publicUser(user) {
   if (!user) return null;
-  return { id: user.id, role: user.role, email: user.email, name: user.name, phone: user.phone, city: user.city, status: user.status, car: user.car, plate: user.plate };
+  return { id: user.id, role: user.role, email: user.email, name: user.name, phone: user.phone, city: user.city, status: user.status, car: user.car, plate: user.plate, notificationChannels: user.notificationChannels || ['email'], telegramHandle: user.telegram_handle || null, maxHandle: user.max_handle || null };
 }
 
 function setSession(req, token) { return { 'Set-Cookie': `ett_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(sessionTtlMs / 1000)}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}` }; }
@@ -174,12 +174,12 @@ async function notifyTelegramRoles(order, eventType, text, roles) {
 
 async function notifyAssignment(order) {
   const text = ['🚘 Назначен автомобиль', `Заказ: ${order.id}`, `Маршрут: ${order.from} → ${order.to}`, `Дата и время: ${order.date || 'не указано'} ${order.time || ''}`, `Клиент: ${order.clientName || order.clientEmail || 'не указан'}`, `Автомобиль: ${order.vehicle}`, `Гос. номер: ${order.vehiclePlate}`, `Водитель: ${order.driverName || order.driverId || 'не указан'}`].join('\n');
-  return notifyTelegramRoles(order, 'vehicle_assigned', text, ['client', 'driver', 'dispatcher']);
+  return notifyTelegramRoles(order, 'vehicle_assigned', text, [...(order.notificationChannels?.includes('telegram') ? ['client'] : []), 'driver', 'dispatcher']);
 }
 
 async function notifyTripReport(order) {
   const text = ['✅ Поездка завершена', `Заказ: ${order.id}`, `Маршрут: ${order.from} → ${order.to}`, `Клиент: ${order.clientName || order.clientEmail}`, `Автомобиль: ${order.vehicle}`, `Гос. номер: ${order.vehiclePlate}`, `Водитель: ${order.driverName || order.driverId}`, `Начало: ${order.tripStartedAt}`, `Завершение: ${order.tripCompletedAt}`, `Отчёт: ${order.report || 'без комментария'}`].join('\n');
-  return notifyTelegramRoles(order, 'trip_completed', text, ['client', 'dispatcher', 'admin']);
+  return notifyTelegramRoles(order, 'trip_completed', text, [...(order.notificationChannels?.includes('telegram') ? ['client'] : []), 'dispatcher', 'admin']);
 }
 
 async function deliverMaxEvent(event, text) {
@@ -204,11 +204,11 @@ async function notifyMaxRoles(order, eventType, text, roles) {
 }
 
 async function notifyMaxAssignment(order) {
-  return notifyMaxRoles(order, 'vehicle_assigned', ['🚘 Назначен автомобиль', `Заказ: ${order.id}`, `Маршрут: ${order.from} → ${order.to}`, `Автомобиль: ${order.vehicle}`, `Гос. номер: ${order.vehiclePlate}`, `Водитель: ${order.driverName || order.driverId}`].join('\n'), ['client', 'driver', 'dispatcher']);
+  return notifyMaxRoles(order, 'vehicle_assigned', ['🚘 Назначен автомобиль', `Заказ: ${order.id}`, `Маршрут: ${order.from} → ${order.to}`, `Автомобиль: ${order.vehicle}`, `Гос. номер: ${order.vehiclePlate}`, `Водитель: ${order.driverName || order.driverId}`].join('\n'), [...(order.notificationChannels?.includes('max') ? ['client'] : []), 'driver', 'dispatcher']);
 }
 
 async function notifyMaxTripReport(order) {
-  return notifyMaxRoles(order, 'trip_completed', ['✅ Поездка завершена', `Заказ: ${order.id}`, `Маршрут: ${order.from} → ${order.to}`, `Отчёт: ${order.report || 'без комментария'}`].join('\n'), ['client', 'dispatcher', 'admin']);
+  return notifyMaxRoles(order, 'trip_completed', ['✅ Поездка завершена', `Заказ: ${order.id}`, `Маршрут: ${order.from} → ${order.to}`, `Отчёт: ${order.report || 'без комментария'}`].join('\n'), [...(order.notificationChannels?.includes('max') ? ['client'] : []), 'dispatcher', 'admin']);
 }
 
 async function calculateOsrmRoute(from, to) {
@@ -272,6 +272,8 @@ async function notifyAssignmentEmail(order, recipient, audience) {
   }
 }
 
+function channelEnabled(user, channel) { return Array.isArray(user?.notificationChannels) && user.notificationChannels.includes(channel); }
+
 function json(res, status, body, headers = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(JSON.stringify(body));
@@ -315,6 +317,14 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && req.url === '/api/audit') {
     if (!requireRole(req, res, ['admin'])) return;
     return json(res, 200, { events: database.listAudit() });
+  }
+  if (req.method === 'PATCH' && req.url === '/api/auth/notification-profile') {
+    const actor = requireRole(req, res, ['client']); if (!actor) return;
+    try {
+      const data = await body(req); const updated = database.updateNotificationProfile(actor.id, { channels: data.channels, telegramHandle: data.telegramHandle, maxHandle: data.maxHandle, phone: data.phone, name: data.name });
+      audit(req, actor, 'auth.notification_profile.update', 'user', actor.id, { channels: updated.notificationChannels });
+      return json(res, 200, { user: publicUser(updated), notificationChannels: updated.notificationChannels, telegramHandle: updated.telegram_handle, maxHandle: updated.max_handle });
+    } catch (error) { return json(res, 400, { error: error.message === 'notification_channel_required' ? error.message : 'invalid_request' }); }
   }
   if (req.method === 'GET' && req.url.startsWith('/api/driver/documents')) {
     const actor = requireRole(req, res, ['driver', 'dispatcher', 'admin']); if (!actor) return;
@@ -403,7 +413,7 @@ async function handleRequest(req, res) {
           : await calculateOsrmRoute(data.from, data.to);
       } catch { route = null; }
       const fields = Object.fromEntries(['from','to','date','time','passengers','carClass','clientPhone'].filter(key => data[key] != null).map(key => [key, String(data[key]).slice(0, 300)]));
-      const order = { ...fields, clientEmail: actor.email, clientName: actor.name, id: `ORD-${crypto.randomUUID()}`, status: 'Новый', paymentStatus: 'Ожидает оплаты комиссии', commissionRate: platformCommissionRate, paymentDeadlineMinutes: 10, createdAt: new Date().toISOString(), ...(route?.available ? { routeDistanceKm: route.distanceKm, routeDurationMin: route.durationMin, basePriceRub: route.basePriceRub, commissionRub: route.commissionRub, clientTotalRub: route.clientTotalRub, pricingRule: route.pricingRule } : {}) };
+      const order = { ...fields, clientEmail: actor.email, clientName: actor.name, notificationChannels: actor.notificationChannels || ['email'], telegramHandle: actor.telegram_handle || null, maxHandle: actor.max_handle || null, id: `ORD-${crypto.randomUUID()}`, status: 'Новый', paymentStatus: 'Ожидает оплаты комиссии', commissionRate: platformCommissionRate, paymentDeadlineMinutes: 10, createdAt: new Date().toISOString(), ...(route?.available ? { routeDistanceKm: route.distanceKm, routeDurationMin: route.durationMin, basePriceRub: route.basePriceRub, commissionRub: route.commissionRub, clientTotalRub: route.clientTotalRub, pricingRule: route.pricingRule } : {}) };
       const orders = readOrders(); orders.push(order); writeOrders(orders); audit(req, actor, 'order.create', 'order', order.id, { from: order.from, to: order.to });
       return json(res, 201, order);
     } catch { return json(res, 400, { error: 'invalid_request' }); }
@@ -512,7 +522,8 @@ async function handleRequest(req, res) {
       try { telegram = await notifyAssignment(order); } catch (error) { console.error(error); telegram = { sent: false, reason: 'telegram_delivery_failed' }; }
       let max = { sent: false, reason: 'max_not_configured' };
       try { max = await notifyMaxAssignment(order); } catch (error) { console.error(error); max = { sent: false, reason: 'max_delivery_failed' }; }
-      const clientEmail = await notifyAssignmentEmail(order, order.clientEmail, 'client');
+      const clientUser = database.findUserByEmail(order.clientEmail);
+      const clientEmail = channelEnabled(clientUser, 'email') ? await notifyAssignmentEmail(order, order.clientEmail, 'client') : { sent: false, reason: 'channel_disabled' };
       const driverEmail = await notifyAssignmentEmail(order, vehicle.email, 'driver');
       order.telegram = telegram; order.max = max; order.emailNotifications = { client: clientEmail, driver: driverEmail };
       writeOrders(orders); audit(req, actor, 'order.assign', 'order', order.id, { driverId: order.driverId, vehiclePlate: order.vehiclePlate, emailClientSent: clientEmail.sent, emailDriverSent: driverEmail.sent }); return json(res, 200, order);
@@ -538,7 +549,7 @@ async function handleRequest(req, res) {
       if (!localDemo && (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS || !process.env.MAIL_FROM)) return json(res, 503, { error: 'smtp_not_configured' });
       const code = localDemo ? '000000' : String(crypto.randomInt(100000, 1000000));
       const requestId = crypto.randomUUID();
-      codes.set(requestId, { email, code, role, name: String(data.name || '').trim(), phone: String(data.phone || '').trim(), car: String(data.car || '').trim(), plate: String(data.plate || '').trim(), passwordHash: hashPassword(String(data.password || (localDemo ? 'demo1234' : crypto.randomBytes(18).toString('base64url')))), expires: Date.now() + 10 * 60_000 });
+      codes.set(requestId, { email, code, role, name: String(data.name || '').trim(), phone: String(data.phone || '').trim(), channels: data.channels, telegramHandle: String(data.telegramHandle || '').trim(), maxHandle: String(data.maxHandle || '').trim(), car: String(data.car || '').trim(), plate: String(data.plate || '').trim(), passwordHash: hashPassword(String(data.password || (localDemo ? 'demo1234' : crypto.randomBytes(18).toString('base64url')))), expires: Date.now() + 10 * 60_000 });
       if (!localDemo) await transporter.sendMail({ from: process.env.MAIL_FROM, to: email, subject: 'Код подтверждения — Экспресс Трансфер Трэвел', text: `Ваш код подтверждения: ${code}. Код действует 10 минут.` });
       return json(res, 200, { requestId, testMode: localDemo, ...(localDemo ? { testCode: code } : {}) });
     } catch (error) {
@@ -556,6 +567,7 @@ async function handleRequest(req, res) {
       const user = existing
         ? database.setUserCredentials(record.email, { passwordHash: record.passwordHash, verifiedAt: new Date().toISOString(), role: record.role, name: record.name, phone: record.phone })
         : database.createUser({ id: `${record.role === 'driver' ? 'DRV' : 'CLI'}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`, role: record.role, email: record.email, name: record.name || record.email.split('@')[0], phone: record.phone, passwordHash: record.passwordHash, verifiedAt: new Date().toISOString(), car: record.car, plate: record.plate });
+      if (record.role === 'client' && record.channels) database.updateNotificationProfile(user.id, { channels: record.channels, telegramHandle: record.telegramHandle, maxHandle: record.maxHandle, phone: record.phone, name: record.name });
       const token = crypto.randomBytes(32).toString('base64url'); database.createSession({ tokenHash: crypto.createHash('sha256').update(token).digest('hex'), userId: user.id, expiresAt: new Date(Date.now() + sessionTtlMs).toISOString() }); audit(req, user, 'auth.register.confirm', 'user', user.id);
       return json(res, 200, { verified: true, user: publicUser(user) }, setSession(req, token));
     } catch { return json(res, 400, { error: 'invalid_request' }); }

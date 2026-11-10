@@ -10,7 +10,8 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY, role TEXT NOT NULL, email TEXT UNIQUE, full_name TEXT NOT NULL,
       phone TEXT, city TEXT, status TEXT, car TEXT, plate TEXT, services_json TEXT,
-      tariffs_json TEXT, password_hash TEXT, verified_at TEXT, created_at TEXT NOT NULL
+      tariffs_json TEXT, password_hash TEXT, verified_at TEXT, notification_channels_json TEXT NOT NULL DEFAULT '["email"]',
+      telegram_handle TEXT, max_handle TEXT, created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS vehicles (
       id TEXT PRIMARY KEY, driver_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -112,6 +113,13 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
     try { db.exec(statement); } catch (error) { if (!String(error.message).includes('duplicate column name')) throw error; }
   }
   for (const statement of [
+    `ALTER TABLE users ADD COLUMN notification_channels_json TEXT NOT NULL DEFAULT '["email"]'`,
+    'ALTER TABLE users ADD COLUMN telegram_handle TEXT',
+    'ALTER TABLE users ADD COLUMN max_handle TEXT'
+  ]) {
+    try { db.exec(statement); } catch (error) { if (!String(error.message).includes('duplicate column name')) throw error; }
+  }
+  for (const statement of [
     'ALTER TABLE payments ADD COLUMN expires_at TEXT',
     'ALTER TABLE payments ADD COLUMN payment_url TEXT',
     'ALTER TABLE payments ADD COLUMN qr_payload TEXT',
@@ -169,7 +177,7 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
   return {
     findUserByEmail(email) {
       const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-      return row ? { ...row, name: row.full_name, services: JSON.parse(row.services_json || '[]'), tariffs: JSON.parse(row.tariffs_json || '[]') } : null;
+      return row ? { ...row, name: row.full_name, services: JSON.parse(row.services_json || '[]'), tariffs: JSON.parse(row.tariffs_json || '[]'), notificationChannels: JSON.parse(row.notification_channels_json || '["email"]') } : null;
     },
     createSession({ tokenHash, userId, expiresAt }) {
       const now = new Date().toISOString(); db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at,created_at,last_seen_at) VALUES (?,?,?,?,?)').run(tokenHash, userId, expiresAt, now, now);
@@ -263,6 +271,13 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
       db.prepare(`UPDATE users SET password_hash=?, verified_at=?, role=COALESCE(?,role), full_name=COALESCE(?,full_name), phone=COALESCE(?,phone), status='Активен' WHERE email=?`)
         .run(passwordHash, verifiedAt || null, role || null, name || null, phone || null, email);
       return this.findUserByEmail(email);
+    },
+    updateNotificationProfile(userId, { channels, telegramHandle, maxHandle, phone, name }) {
+      const safeChannels = [...new Set((Array.isArray(channels) ? channels : []).filter(item => ['email', 'telegram', 'max'].includes(item)))];
+      if (!safeChannels.length) throw new Error('notification_channel_required');
+      db.prepare(`UPDATE users SET notification_channels_json=?,telegram_handle=?,max_handle=?,phone=COALESCE(?,phone),full_name=COALESCE(?,full_name) WHERE id=?`)
+        .run(JSON.stringify(safeChannels), String(telegramHandle || '').trim().slice(0, 100) || null, String(maxHandle || '').trim().slice(0, 100) || null, phone || null, name || null, userId);
+      return this.findUserByEmail(db.prepare('SELECT email FROM users WHERE id=?').get(userId).email);
     },
     readUsers() {
       const rows = rowsToUsers(db.prepare('SELECT * FROM users ORDER BY id').all());
