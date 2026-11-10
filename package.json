@@ -2,6 +2,6 @@
   "name": "expresstransfertravel",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node server.mjs" },
-  "dependencies": { "nodemailer": "^7.0.3" }
+  "scripts": { "start": "node server.mjs", "backup:db": "node scripts/backup-db.mjs", "restore:db": "node scripts/restore-db.mjs" },
+  "dependencies": { "nodemailer": "^10.4.1" }
 }

@@ -34,7 +34,7 @@ npm start
 
 Регистрация: `POST /api/auth/client/register` или `POST /api/auth/register` с `email`, `name`, `phone`, `password` и ролью `client`/`driver`. После подтверждения кода вход выполняется через `POST /api/auth/login`; сессия хранится в HttpOnly-cookie. Текущий профиль доступен через `GET /api/auth/me`. Список пользователей доступен только ролям `admin` и `dispatcher` через `GET /api/users`.
 
-Локальный `TEST_AUTH_MODE=true` разрешает адреса `@example.com` с кодом `000000`; это режим проверки и не заменяет SMTP-аутентификацию production.
+Локальный `TEST_AUTH_MODE=true` разрешает адреса `@example.com` с кодом `000000`; в этом режиме также доступны тестовые `/api/test-users` и `/api/test-users/reset`. Это режим проверки и не заменяет SMTP-аутентификацию production.
 
 ## Диспетчерская панель
 
@@ -43,6 +43,10 @@ npm start
 ## Платежи
 
 После назначения машины сервер создаёт платёж `pending` на сумму комиссии, `paymentUrl` и `qrPayload` со сроком действия 10 минут. Клиент может получить его через `GET /api/orders/:id/payment` и оплатить в локальном контуре через `POST /api/orders/:id/pay-commission`. Для эквайринга используется `POST /api/payments/webhook`; подпись HMAC SHA-256 передаётся в `X-Payment-Signature`, секрет задаётся `PAYMENT_WEBHOOK_SECRET`. Повторный webhook безопасен и возвращает `idempotent: true`. Отмена: `POST /api/payments/:id/cancel`, возврат staff-ролью: `POST /api/payments/:id/refund`.
+
+## Безопасность и эксплуатация
+
+Сессии хранятся в SQLite в виде SHA-256 хеша токена и переживают перезапуск процесса. Mutation-запросы проверяют `Origin`/Fetch Metadata, включены rate limit и security headers. Аудит доступен только `admin` через `GET /api/audit`. Документы водителя принимаются только через JSON Base64 с whitelist MIME (`PDF/JPEG/PNG`), лимитом 5 МБ и проверкой сигнатуры; endpoint — `POST /api/driver/documents`. Резервная копия: `npm run backup:db`; восстановление: `npm run restore:db -- backups/<file>.sqlite`.
 
 ## Локальный OSRM без ключа
 

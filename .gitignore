@@ -2,6 +2,8 @@ node_modules/
 .env
 data/orders.json
 data/platform.sqlite
+backups/
+data/driver-documents/
 .playwright-mcp/
 .env
 *.log

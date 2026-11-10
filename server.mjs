@@ -10,14 +10,13 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 8787);
 const testAuth = String(process.env.TEST_AUTH_MODE || 'false') === 'true';
 const codes = new Map();
-const sessions = new Map();
 const sessionTtlMs = 7 * 24 * 60 * 60_000;
-const dataDir = path.join(root, 'data');
-const usersFile = path.join(dataDir, 'test-users.json');
+const dataDir = path.resolve(process.env.DATA_DIR || path.join(root, 'data'));
+const usersFile = path.join(root, 'data', 'test-users.json');
 const ordersFile = path.join(dataDir, 'orders.json');
-const platformDbFile = path.join(dataDir, 'platform-db.json');
-const fixedDirectionsFile = path.join(dataDir, 'fixed-directions.json');
-const carClassificationFile = path.join(dataDir, 'car-classification.json');
+const platformDbFile = path.join(root, 'data', 'platform-db.json');
+const fixedDirectionsFile = path.join(root, 'data', 'fixed-directions.json');
+const carClassificationFile = path.join(root, 'data', 'car-classification.json');
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN || '';
 const telegramChatId = process.env.TELEGRAM_CHAT_ID || '';
 const telegramChats = {
@@ -31,6 +30,13 @@ const osrmUrl = (process.env.OSRM_URL || 'http://localhost:5000').replace(/\/$/,
 const distanceRateRub = 75;
 const platformCommissionRate = 0.2;
 const osrmTimeoutMs = Number(process.env.OSRM_TIMEOUT_MS || 8000);
+const rateWindowMs = 60_000;
+const rateLimit = Number(process.env.RATE_LIMIT || 120);
+const rateBuckets = new Map();
+const uploadDir = path.join(dataDir, 'driver-documents');
+const maxDocumentBytes = 5 * 1024 * 1024;
+const allowedDocumentTypes = new Set(['passport', 'license', 'vehicle_registration', 'insurance']);
+const allowedDocumentMime = new Map([['application/pdf', '.pdf'], ['image/jpeg', '.jpg'], ['image/png', '.png']]);
 const paymentWebhookSecret = process.env.PAYMENT_WEBHOOK_SECRET || '';
 const knownPlaces = {
   'Калининград': [54.7104, 20.4522], 'Светлогорск': [54.9438, 20.1514], 'Зеленоградск': [54.9581, 20.4759], 'Советск': [55.0810, 21.8886], 'Черняховск': [54.6311, 21.8156], 'Гурьевск': [54.7717, 20.6032], 'Гусев': [54.5922, 22.1947], 'Балтийск': [54.6514, 19.9142], 'Светлый': [54.6750, 20.1347], 'Янтарный': [54.8710, 19.9380], 'Куршская коса': [55.1700, 20.8500], 'п. Лесной': [55.0200, 20.8700], 'п. Морской': [55.1300, 20.7700], 'п. Рыбачий': [55.1500, 20.8000], 'дюна Эфа': [55.2340, 20.9130], 'Танцующий лес': [55.1740, 20.8530], 'Аэропорт Храброво': [54.8900, 20.5920]
@@ -49,6 +55,7 @@ const seedUsers = {
 };
 
 fs.mkdirSync(dataDir, { recursive: true });
+fs.mkdirSync(uploadDir, { recursive: true });
 if (!fs.existsSync(usersFile)) fs.writeFileSync(usersFile, JSON.stringify(seedUsers, null, 2), 'utf8');
 if (!fs.existsSync(ordersFile)) fs.writeFileSync(ordersFile, '[]', 'utf8');
 if (!fs.existsSync(platformDbFile)) fs.writeFileSync(platformDbFile, JSON.stringify({ schemaVersion: 1, updatedAt: new Date().toISOString().slice(0, 10), drivers: [], clients: [], districts: [{ id: 'central', name: 'Центральный район', tripPriceRub: null }, { id: 'moscow', name: 'Московский район', tripPriceRub: null }, { id: 'leningrad', name: 'Ленинградский район', tripPriceRub: null }, { id: 'october', name: 'Октябрьский район', tripPriceRub: null }], streets: [], orders: [] }, null, 2), 'utf8');
@@ -84,8 +91,10 @@ function parseCookies(req) {
 
 function currentUser(req) {
   const token = parseCookies(req).ett_session;
-  const session = sessions.get(token);
-  if (!session || session.expiresAt < Date.now()) { if (token) sessions.delete(token); return null; }
+  if (!token) return null;
+  const hash = crypto.createHash('sha256').update(token).digest('hex');
+  const session = database.findSession(hash);
+  if (!session || Date.parse(session.expiresAt) < Date.now()) { database.deleteSession(hash); return null; }
   return database.findUserByEmail(session.email);
 }
 
@@ -94,13 +103,30 @@ function publicUser(user) {
   return { id: user.id, role: user.role, email: user.email, name: user.name, phone: user.phone, city: user.city, status: user.status, car: user.car, plate: user.plate };
 }
 
-function setSession(req, token) { return { 'Set-Cookie': `ett_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(sessionTtlMs / 1000)}` }; }
+function setSession(req, token) { return { 'Set-Cookie': `ett_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(sessionTtlMs / 1000)}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}` }; }
 
 function requireRole(req, res, roles) {
   const user = currentUser(req);
   if (!user) { json(res, 401, { error: 'authentication_required' }); return null; }
   if (!roles.includes(user.role)) { json(res, 403, { error: 'insufficient_role' }); return null; }
   return user;
+}
+
+function clientIp(req) { return process.env.TRUST_PROXY === 'true' ? String(req.headers['x-real-ip'] || req.socket.remoteAddress || 'unknown') : String(req.socket.remoteAddress || 'unknown'); }
+function audit(req, actor, action, resourceType, resourceId, metadata = {}) { database.createAudit({ actorId: actor?.id, action, resourceType, resourceId, ip: clientIp(req), metadata }); }
+function checkRateLimit(req, res) {
+  const now = Date.now(); const key = clientIp(req); const bucket = rateBuckets.get(key) || { startedAt: now, count: 0 };
+  if (now - bucket.startedAt >= rateWindowMs) { bucket.startedAt = now; bucket.count = 0; }
+  bucket.count += 1; rateBuckets.set(key, bucket);
+  for (const [ip, entry] of rateBuckets) if (now - entry.startedAt > rateWindowMs) rateBuckets.delete(ip);
+  if (bucket.count > rateLimit) { json(res, 429, { error: 'rate_limit_exceeded' }, { 'Retry-After': '60' }); return false; }
+  return true;
+}
+function sameOrigin(req) {
+  if (req.headers['sec-fetch-site'] === 'cross-site') return false;
+  const origin = req.headers.origin || req.headers.referer;
+  if (!origin) return true;
+  try { return new URL(origin).origin === new URL(process.env.PUBLIC_ORIGIN || `http://${req.headers.host}`).origin; } catch { return false; }
 }
 
 function normalizePlace(value) {
@@ -184,14 +210,14 @@ const transporter = nodemailer.createTransport({
 });
 
 function json(res, status, body, headers = {}) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', ...headers });
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(JSON.stringify(body));
 }
 
-function body(req) {
+function body(req, maxBytes = 32_000) {
   return new Promise((resolve, reject) => {
     let value = '';
-    req.on('data', chunk => { value += chunk; if (value.length > 32_000) reject(new Error('payload too large')); });
+    req.on('data', chunk => { value += chunk; if (value.length > maxBytes) reject(new Error('payload too large')); });
     req.on('end', () => { try { resolve(JSON.parse(value || '{}')); } catch { reject(new Error('invalid json')); } });
     req.on('error', reject);
   });
@@ -214,12 +240,38 @@ function paymentSignature(payload) {
   return crypto.createHmac('sha256', paymentWebhookSecret).update(payload).digest('hex');
 }
 
-const server = http.createServer(async (req, res) => {
+async function handleRequest(req, res) {
+  if (!checkRateLimit(req, res)) return;
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && !sameOrigin(req)) return json(res, 403, { error: 'origin_not_allowed' });
   if (req.method === 'OPTIONS') return json(res, 204, {});
-  if (req.method === 'GET' && req.url === '/api/test-users') return json(res, 200, readUsers());
+  if (req.method === 'GET' && req.url === '/api/test-users') return testAuth ? json(res, 200, readUsers()) : json(res, 404, { error: 'not_found' });
   if (req.method === 'GET' && req.url === '/api/users') {
     if (!requireRole(req, res, ['admin', 'dispatcher'])) return;
     return json(res, 200, { users: database.listUsers() });
+  }
+  if (req.method === 'GET' && req.url === '/api/audit') {
+    if (!requireRole(req, res, ['admin'])) return;
+    return json(res, 200, { events: database.listAudit() });
+  }
+  if (req.method === 'GET' && req.url.startsWith('/api/driver/documents')) {
+    const actor = requireRole(req, res, ['driver', 'dispatcher', 'admin']); if (!actor) return;
+    const query = new URL(req.url, `http://${req.headers.host}`); const driverId = actor.role === 'driver' ? actor.id : query.searchParams.get('driverId');
+    if (!driverId) return json(res, 400, { error: 'driver_id_required' });
+    return json(res, 200, { documents: database.listDocuments(driverId) });
+  }
+  if (req.method === 'POST' && req.url === '/api/driver/documents') {
+    const actor = requireRole(req, res, ['driver']); if (!actor) return;
+    try {
+      const data = await body(req, Math.ceil(maxDocumentBytes * 1.4) + 1000); const documentType = String(data.documentType || ''); const mimeType = String(data.mimeType || '').toLowerCase();
+      if (!allowedDocumentTypes.has(documentType) || !allowedDocumentMime.has(mimeType)) return json(res, 400, { error: 'unsupported_document' });
+      const encoded = String(data.contentBase64 || ''); if (!encoded || encoded.length > Math.ceil(maxDocumentBytes * 1.4)) return json(res, 413, { error: 'document_too_large' });
+      const content = Buffer.from(encoded, 'base64'); if (!content.length || content.length > maxDocumentBytes) return json(res, 413, { error: 'document_too_large' });
+      const valid = mimeType === 'application/pdf' ? content.subarray(0, 5).toString() === '%PDF-' : mimeType === 'image/png' ? content.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a','hex')) : content.subarray(0, 3).equals(Buffer.from('ffd8ff','hex'));
+      if (!valid) return json(res, 422, { error: 'document_signature_mismatch' });
+      const id = crypto.randomUUID(); const storageKey = `${id}${allowedDocumentMime.get(mimeType)}`; fs.writeFileSync(path.join(uploadDir, storageKey), content, { flag: 'wx' });
+      database.createDocument({ driverId: actor.id, documentType, storageKey }); audit(req, actor, 'driver.document.upload', 'driver_document', storageKey, { documentType, mimeType, bytes: content.length });
+      return json(res, 201, { uploaded: true, documentType, status: 'На проверке' });
+    } catch { return json(res, 400, { error: 'invalid_document' }); }
   }
   if (req.method === 'GET' && req.url === '/api/tariffs') return json(res, 200, { tariffs: database.listTariffs(), directions: database.listDirections() });
   if (req.method === 'GET' && req.url.startsWith('/api/telegram/events')) {
@@ -283,8 +335,9 @@ const server = http.createServer(async (req, res) => {
           ? await calculateOsrmCoordinates([Number(data.fromLat), Number(data.fromLon)], [Number(data.toLat), Number(data.toLon)], String(data.from).trim(), String(data.to).trim())
           : await calculateOsrmRoute(data.from, data.to);
       } catch { route = null; }
-      const order = { id: `ORD-${Date.now().toString(36).toUpperCase()}`, status: 'Новый', paymentStatus: 'Ожидает оплаты комиссии', commissionRate: platformCommissionRate, paymentDeadlineMinutes: 10, createdAt: new Date().toISOString(), ...(route?.available ? { routeDistanceKm: route.distanceKm, routeDurationMin: route.durationMin, basePriceRub: route.basePriceRub, commissionRub: route.commissionRub, clientTotalRub: route.clientTotalRub, pricingRule: route.pricingRule } : {}), ...data };
-      const orders = readOrders(); orders.push(order); writeOrders(orders);
+      const fields = Object.fromEntries(['from','to','date','time','passengers','carClass','clientPhone'].filter(key => data[key] != null).map(key => [key, String(data[key]).slice(0, 300)]));
+      const order = { ...fields, clientEmail: actor.email, clientName: actor.name, id: `ORD-${crypto.randomUUID()}`, status: 'Новый', paymentStatus: 'Ожидает оплаты комиссии', commissionRate: platformCommissionRate, paymentDeadlineMinutes: 10, createdAt: new Date().toISOString(), ...(route?.available ? { routeDistanceKm: route.distanceKm, routeDurationMin: route.durationMin, basePriceRub: route.basePriceRub, commissionRub: route.commissionRub, clientTotalRub: route.clientTotalRub, pricingRule: route.pricingRule } : {}) };
+      const orders = readOrders(); orders.push(order); writeOrders(orders); audit(req, actor, 'order.create', 'order', order.id, { from: order.from, to: order.to });
       return json(res, 201, order);
     } catch { return json(res, 400, { error: 'invalid_request' }); }
   }
@@ -292,7 +345,7 @@ const server = http.createServer(async (req, res) => {
     const actor = requireRole(req, res, ['driver']); if (!actor) return;
     const orderId = req.url.split('/')[3]; const data = await body(req); const orders = readOrders(); const order = orders.find(item => item.id === orderId);
     if (!order || order.status !== 'Новый') return json(res, 409, { error: 'order_not_available' });
-    Object.assign(order, { status: 'Принят водителем', acceptedAt: new Date().toISOString(), driverId: actor.id, driverName: actor.name }); writeOrders(orders); return json(res, 200, order);
+    Object.assign(order, { status: 'Принят водителем', acceptedAt: new Date().toISOString(), driverId: actor.id, driverName: actor.name }); writeOrders(orders); audit(req, actor, 'order.accept', 'order', order.id); return json(res, 200, order);
   }
   if (req.method === 'GET' && req.url.startsWith('/api/orders/') && req.url.endsWith('/payment')) {
     const actor = requireRole(req, res, ['client', 'dispatcher', 'admin']); if (!actor) return;
@@ -336,10 +389,12 @@ const server = http.createServer(async (req, res) => {
       const updated = database.updatePayment(payment.id, { status: 'paid', externalId: String(data.externalId || ''), paidAt: new Date().toISOString(), method: data.method === 'qr' ? 'QR-код' : 'Карта' });
       const orders = readOrders(); const order = orders.find(item => item.id === payment.orderId);
       if (order) { order.paymentStatus = 'Комиссия оплачена'; order.paymentMethod = updated.method; order.commissionPaidAt = updated.paidAt; order.status = 'Подтверждён клиентом'; writeOrders(orders); }
+      audit(req, null, 'payment.webhook.paid', 'payment', payment.id, { orderId: payment.orderId });
       return json(res, 200, { ok: true, payment: paymentResponse(updated), order });
     } catch { return json(res, 400, { error: 'invalid_webhook' }); }
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/pay-commission')) {
+    if (!testAuth || process.env.NODE_ENV === 'production') return json(res, 503, { error: 'mock_payment_disabled' });
     const actor = requireRole(req, res, ['client']); if (!actor) return;
     const orderId = req.url.split('/')[3]; const data = await body(req); const orders = readOrders(); const order = orders.find(item => item.id === orderId);
     if (!order || order.clientEmail !== actor.email) return json(res, 403, { error: 'order_owner_required' });
@@ -348,14 +403,14 @@ const server = http.createServer(async (req, res) => {
     if (!payment || payment.status !== 'pending') return json(res, 409, { error: 'payment_not_pending' });
     if (Date.parse(payment.expiresAt) <= Date.now()) { database.updatePayment(payment.id, { status: 'expired' }); return json(res, 409, { error: 'payment_window_expired' }); }
     const updated = database.updatePayment(payment.id, { status: 'paid', externalId: `mock-${crypto.randomBytes(5).toString('hex')}`, paidAt: new Date().toISOString(), method: data.method === 'qr' ? 'QR-код' : 'Карта' });
-    Object.assign(order, { paymentStatus: 'Комиссия оплачена', paymentMethod: updated.method, commissionPaidAt: updated.paidAt, status: 'Подтверждён клиентом' }); writeOrders(orders); return json(res, 200, { ...order, payment: paymentResponse(updated) });
+    Object.assign(order, { paymentStatus: 'Комиссия оплачена', paymentMethod: updated.method, commissionPaidAt: updated.paidAt, status: 'Подтверждён клиентом' }); writeOrders(orders); audit(req, actor, 'payment.paid', 'payment', payment.id, { orderId: order.id, method: updated.method }); return json(res, 200, { ...order, payment: paymentResponse(updated) });
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/start')) {
     const actor = requireRole(req, res, ['driver']); if (!actor) return;
     const orderId = req.url.split('/')[3]; const orders = readOrders(); const order = orders.find(item => item.id === orderId);
     if (!order || order.driverId !== actor.id) return json(res, 403, { error: 'assigned_driver_required' });
     if (order.status !== 'Подтверждён клиентом' || order.paymentStatus !== 'Комиссия оплачена') return json(res, 409, { error: 'order_not_ready_to_start' });
-    Object.assign(order, { status: 'В поездке', tripStartedAt: new Date().toISOString() }); writeOrders(orders); return json(res, 200, order);
+    Object.assign(order, { status: 'В поездке', tripStartedAt: new Date().toISOString() }); writeOrders(orders); audit(req, actor, 'trip.start', 'order', order.id); return json(res, 200, order);
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/complete')) {
     const actor = requireRole(req, res, ['driver']); if (!actor) return;
@@ -364,7 +419,7 @@ const server = http.createServer(async (req, res) => {
     if (order.status !== 'В поездке') return json(res, 409, { error: 'order_not_in_trip' });
     Object.assign(order, { status: 'Завершён', tripCompletedAt: new Date().toISOString(), report: String(data.report || 'Поездка завершена без замечаний') });
     try { order.telegramReport = await notifyTripReport(order); } catch { order.telegramReport = { sent: false, reason: 'telegram_delivery_failed' }; }
-    writeOrders(orders); return json(res, 200, order);
+    writeOrders(orders); audit(req, actor, 'trip.complete', 'order', order.id, { report: order.report }); return json(res, 200, order);
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/assign')) {
     try {
@@ -387,10 +442,13 @@ const server = http.createServer(async (req, res) => {
       }
       let telegram = { sent: false, reason: 'telegram_not_configured' };
       try { telegram = await notifyAssignment(order); } catch (error) { console.error(error); telegram = { sent: false, reason: 'telegram_delivery_failed' }; }
-      order.telegram = telegram; writeOrders(orders); return json(res, 200, order);
+      order.telegram = telegram; writeOrders(orders); audit(req, actor, 'order.assign', 'order', order.id, { driverId: order.driverId, vehiclePlate: order.vehiclePlate }); return json(res, 200, order);
     } catch { return json(res, 400, { error: 'invalid_request' }); }
   }
-  if (req.method === 'POST' && req.url === '/api/test-users/reset') { writeUsers(seedUsers); return json(res, 200, readUsers()); }
+  if (req.method === 'POST' && req.url === '/api/test-users/reset') {
+    if (!testAuth) return json(res, 404, { error: 'not_found' });
+    const actor = currentUser(req); writeUsers(seedUsers); audit(req, actor, 'test.reset', 'users', null); return json(res, 200, readUsers());
+  }
   if (req.method === 'POST' && (req.url === '/api/auth/register' || req.url === '/api/auth/client/register')) {
     try {
       const data = await body(req);
@@ -425,8 +483,8 @@ const server = http.createServer(async (req, res) => {
       const user = existing
         ? database.setUserCredentials(record.email, { passwordHash: record.passwordHash, verifiedAt: new Date().toISOString(), role: record.role, name: record.name, phone: record.phone })
         : database.createUser({ id: `${record.role === 'driver' ? 'DRV' : 'CLI'}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`, role: record.role, email: record.email, name: record.name || record.email.split('@')[0], phone: record.phone, passwordHash: record.passwordHash, verifiedAt: new Date().toISOString(), car: record.car, plate: record.plate });
-      const token = crypto.randomBytes(32).toString('base64url'); sessions.set(token, { email: record.email, expiresAt: Date.now() + sessionTtlMs });
-      return json(res, 200, { verified: true, user: publicUser(user) }, { 'Set-Cookie': `ett_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(sessionTtlMs / 1000)}` });
+      const token = crypto.randomBytes(32).toString('base64url'); database.createSession({ tokenHash: crypto.createHash('sha256').update(token).digest('hex'), userId: user.id, expiresAt: new Date(Date.now() + sessionTtlMs).toISOString() }); audit(req, user, 'auth.register.confirm', 'user', user.id);
+      return json(res, 200, { verified: true, user: publicUser(user) }, setSession(req, token));
     } catch { return json(res, 400, { error: 'invalid_request' }); }
   }
   if (req.method === 'POST' && req.url === '/api/auth/login') {
@@ -435,21 +493,36 @@ const server = http.createServer(async (req, res) => {
       const user = database.findUserByEmail(email);
       if (!user || !user.verified_at || !verifyPassword(password, user.password_hash)) return json(res, 401, { error: 'invalid_credentials' });
       if (data.role && data.role !== user.role) return json(res, 403, { error: 'role_mismatch' });
-      const token = crypto.randomBytes(32).toString('base64url'); sessions.set(token, { email, expiresAt: Date.now() + sessionTtlMs });
+      const token = crypto.randomBytes(32).toString('base64url'); database.createSession({ tokenHash: crypto.createHash('sha256').update(token).digest('hex'), userId: user.id, expiresAt: new Date(Date.now() + sessionTtlMs).toISOString() }); audit(req, user, 'auth.login', 'user', user.id);
       return json(res, 200, { user: publicUser(user) }, setSession(req, token));
     } catch { return json(res, 400, { error: 'invalid_request' }); }
   }
   if (req.method === 'GET' && req.url === '/api/auth/me') return json(res, 200, { user: publicUser(currentUser(req)) });
   if (req.method === 'POST' && req.url === '/api/auth/logout') {
-    const token = parseCookies(req).ett_session; if (token) sessions.delete(token);
+    const actor = currentUser(req); const token = parseCookies(req).ett_session; if (token) database.deleteSession(crypto.createHash('sha256').update(token).digest('hex')); audit(req, actor, 'auth.logout', 'user', actor?.id);
     return json(res, 200, { loggedOut: true }, { 'Set-Cookie': 'ett_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0' });
   }
   if (req.method === 'GET') {
-    const file = req.url === '/' ? '/index.html' : req.url;
-    const filePath = path.join(root, file);
-    if (filePath.startsWith(root) && fs.existsSync(filePath)) return fs.createReadStream(filePath).pipe(res);
+    const file = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+    const relative = file === '/' ? 'index.html' : file.slice(1);
+    const allowed = ['index.html','dispatcher.html','test-admin.html','logo.png','kaliningrad-region-map.png'].includes(relative) || relative.startsWith('assets/') || relative.startsWith('css/');
+    const filePath = path.resolve(root, relative);
+    if (allowed && filePath.startsWith(root + path.sep) && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      const mime = { '.html':'text/html; charset=utf-8', '.css':'text/css', '.png':'image/png', '.svg':'image/svg+xml' }[path.extname(filePath)] || 'application/octet-stream';
+      res.setHeader('Content-Type', mime); fs.createReadStream(filePath).on('error', () => res.destroy()).pipe(res); return;
+    }
   }
   json(res, 404, { error: 'not_found' });
+}
+
+if (process.env.NODE_ENV === 'production' && testAuth) throw new Error('test_auth_forbidden_in_production');
+const server = http.createServer((req, res) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Content-Security-Policy', "default-src 'self' https: data:; script-src 'self' https: 'unsafe-inline'; style-src 'self' https: 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+  if (process.env.NODE_ENV === 'production') res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+  handleRequest(req, res).catch(() => { if (!res.headersSent) json(res, 400, { error: 'invalid_request' }); else res.destroy(); });
 });
 
-server.listen(port, () => console.log(`Express Transfer Travel server: http://localhost:${port}`));
+server.listen(port, process.env.HOST || '127.0.0.1', () => console.log(`Express Transfer Travel server: http://localhost:${port}`));

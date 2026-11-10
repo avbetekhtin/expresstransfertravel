@@ -107,6 +107,25 @@ CREATE TABLE IF NOT EXISTS telegram_events (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_id TEXT,
+  action TEXT NOT NULL,
+  resource_type TEXT,
+  resource_id TEXT,
+  ip TEXT,
+  metadata_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_client_email ON orders(client_email);
 CREATE INDEX IF NOT EXISTS idx_orders_driver_id ON orders(driver_id);

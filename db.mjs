@@ -57,6 +57,23 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS sessions (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor_id TEXT,
+      action TEXT NOT NULL,
+      resource_type TEXT,
+      resource_id TEXT,
+      ip TEXT,
+      metadata_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS telegram_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       order_id TEXT,
@@ -142,6 +159,23 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
       const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
       return row ? { ...row, name: row.full_name, services: JSON.parse(row.services_json || '[]'), tariffs: JSON.parse(row.tariffs_json || '[]') } : null;
     },
+    createSession({ tokenHash, userId, expiresAt }) {
+      const now = new Date().toISOString(); db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at,created_at,last_seen_at) VALUES (?,?,?,?,?)').run(tokenHash, userId, expiresAt, now, now);
+    },
+    findSession(tokenHash) {
+      const row = db.prepare(`SELECT s.token_hash AS tokenHash,s.user_id AS userId,s.expires_at AS expiresAt,u.email FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?`).get(tokenHash);
+      if (!row) return null; db.prepare('UPDATE sessions SET last_seen_at=? WHERE token_hash=?').run(new Date().toISOString(), tokenHash); return row;
+    },
+    deleteSession(tokenHash) { db.prepare('DELETE FROM sessions WHERE token_hash=?').run(tokenHash); },
+    deleteExpiredSessions() { db.prepare('DELETE FROM sessions WHERE expires_at<?').run(new Date().toISOString()); },
+    createAudit({ actorId, action, resourceType, resourceId, ip, metadata = {} }) {
+      db.prepare('INSERT INTO audit_log(actor_id,action,resource_type,resource_id,ip,metadata_json,created_at) VALUES (?,?,?,?,?,?,?)').run(actorId || null, action, resourceType || null, resourceId || null, ip || null, JSON.stringify(metadata), new Date().toISOString());
+    },
+    listAudit(limit = 200) { return db.prepare('SELECT id,actor_id AS actorId,action,resource_type AS resourceType,resource_id AS resourceId,ip,metadata_json AS metadataJson,created_at AS createdAt FROM audit_log ORDER BY id DESC LIMIT ?').all(Math.min(Math.max(Number(limit) || 200, 1), 500)).map(row => ({ ...row, metadata: JSON.parse(row.metadataJson) })); },
+    createDocument({ driverId, documentType, storageKey }) {
+      const now = new Date().toISOString(); db.prepare(`INSERT INTO driver_documents(driver_id,document_type,storage_key,status,uploaded_at) VALUES (?,?,?,?,?) ON CONFLICT(driver_id,document_type) DO UPDATE SET storage_key=excluded.storage_key,status='На проверке',uploaded_at=excluded.uploaded_at`).run(driverId, documentType, storageKey, 'На проверке', now);
+    },
+    listDocuments(driverId) { return db.prepare('SELECT id,driver_id AS driverId,document_type AS documentType,status,uploaded_at AS uploadedAt FROM driver_documents WHERE driver_id=? ORDER BY uploaded_at DESC').all(driverId); },
     listUsers() {
       return db.prepare(`SELECT id,role,email,full_name AS name,phone,city,status,car,plate,verified_at AS verifiedAt,created_at AS createdAt
         FROM users ORDER BY role, name`).all();
@@ -170,29 +204,6 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
       db.prepare(`UPDATE payments SET method=?,status=?,external_id=?,paid_at=?,expires_at=?,payment_url=?,qr_payload=?,refunded_at=?,updated_at=? WHERE id=?`)
         .run(next.method || null, next.status, next.externalId || null, next.paidAt || null, next.expiresAt || null, next.paymentUrl || null, next.qrPayload || null, next.refundedAt || null, next.updatedAt, id);
       return this.findPayment(id);
-    },
-    createTelegramEvent({ orderId, eventType, role, chatId, payload, status = 'pending', attempts = 0, lastError = null, sentAt = null }) {
-      const now = new Date().toISOString();
-      const result = db.prepare(`INSERT INTO telegram_events (order_id,event_type,role,chat_id,payload_json,status,attempts,last_error,sent_at,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(orderId || null, eventType, role, chatId || null, JSON.stringify(payload), status, attempts, lastError, sentAt, now, now);
-      return this.findTelegramEvent(Number(result.lastInsertRowid));
-    },
-    updateTelegramEvent(id, patch) {
-      const current = this.findTelegramEvent(id); if (!current) return null;
-      const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
-      db.prepare(`UPDATE telegram_events SET status=?,attempts=?,last_error=?,sent_at=?,updated_at=? WHERE id=?`)
-        .run(next.status, next.attempts, next.lastError || null, next.sentAt || null, next.updatedAt, id);
-      return this.findTelegramEvent(id);
-    },
-    findTelegramEvent(id) {
-      const row = db.prepare(`SELECT id,order_id AS orderId,event_type AS eventType,role,chat_id AS chatId,payload_json AS payloadJson,status,attempts,last_error AS lastError,sent_at AS sentAt,created_at AS createdAt,updated_at AS updatedAt FROM telegram_events WHERE id=?`).get(id);
-      return row ? { ...row, payload: JSON.parse(row.payloadJson) } : null;
-    },
-    listTelegramEvents(orderId) {
-      const rows = orderId
-        ? db.prepare(`SELECT id,order_id AS orderId,event_type AS eventType,role,chat_id AS chatId,status,attempts,last_error AS lastError,sent_at AS sentAt,created_at AS createdAt,updated_at AS updatedAt FROM telegram_events WHERE order_id=? ORDER BY created_at`).all(orderId)
-        : db.prepare(`SELECT id,order_id AS orderId,event_type AS eventType,role,chat_id AS chatId,status,attempts,last_error AS lastError,sent_at AS sentAt,created_at AS createdAt,updated_at AS updatedAt FROM telegram_events ORDER BY created_at DESC LIMIT 200`).all();
-      return rows;
     },
     createTelegramEvent({ orderId, eventType, role, chatId, payload, status = 'pending', attempts = 0, lastError = null, sentAt = null }) {
       const now = new Date().toISOString();
