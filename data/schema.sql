@@ -84,7 +84,12 @@ CREATE TABLE IF NOT EXISTS payments (
   status TEXT NOT NULL,
   external_id TEXT,
   paid_at TEXT,
+  expires_at TEXT,
+  payment_url TEXT,
+  qr_payload TEXT,
+  refunded_at TEXT,
   created_at TEXT NOT NULL
+  ,updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);

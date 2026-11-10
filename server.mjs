@@ -24,6 +24,7 @@ const osrmUrl = (process.env.OSRM_URL || 'http://localhost:5000').replace(/\/$/,
 const distanceRateRub = 75;
 const platformCommissionRate = 0.2;
 const osrmTimeoutMs = Number(process.env.OSRM_TIMEOUT_MS || 8000);
+const paymentWebhookSecret = process.env.PAYMENT_WEBHOOK_SECRET || '';
 const knownPlaces = {
   'Калининград': [54.7104, 20.4522], 'Светлогорск': [54.9438, 20.1514], 'Зеленоградск': [54.9581, 20.4759], 'Советск': [55.0810, 21.8886], 'Черняховск': [54.6311, 21.8156], 'Гурьевск': [54.7717, 20.6032], 'Гусев': [54.5922, 22.1947], 'Балтийск': [54.6514, 19.9142], 'Светлый': [54.6750, 20.1347], 'Янтарный': [54.8710, 19.9380], 'Куршская коса': [55.1700, 20.8500], 'п. Лесной': [55.0200, 20.8700], 'п. Морской': [55.1300, 20.7700], 'п. Рыбачий': [55.1500, 20.8000], 'дюна Эфа': [55.2340, 20.9130], 'Танцующий лес': [55.1740, 20.8530], 'Аэропорт Храброво': [54.8900, 20.5920]
 };
@@ -186,6 +187,23 @@ function body(req) {
   });
 }
 
+function rawBody(req) {
+  return new Promise((resolve, reject) => {
+    let value = '';
+    req.on('data', chunk => { value += chunk; if (value.length > 32_000) reject(new Error('payload too large')); });
+    req.on('end', () => resolve(value)); req.on('error', reject);
+  });
+}
+
+function paymentResponse(payment) {
+  if (!payment) return null;
+  return { id: payment.id, orderId: payment.orderId, provider: payment.provider, method: payment.method, amountRub: payment.amountRub, status: payment.status, expiresAt: payment.expiresAt, paymentUrl: payment.paymentUrl, qrPayload: payment.qrPayload, paidAt: payment.paidAt, refundedAt: payment.refundedAt };
+}
+
+function paymentSignature(payload) {
+  return crypto.createHmac('sha256', paymentWebhookSecret).update(payload).digest('hex');
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return json(res, 204, {});
   if (req.method === 'GET' && req.url === '/api/test-users') return json(res, 200, readUsers());
@@ -254,12 +272,61 @@ const server = http.createServer(async (req, res) => {
     if (!order || order.status !== 'Новый') return json(res, 409, { error: 'order_not_available' });
     Object.assign(order, { status: 'Принят водителем', acceptedAt: new Date().toISOString(), driverId: actor.id, driverName: actor.name }); writeOrders(orders); return json(res, 200, order);
   }
+  if (req.method === 'GET' && req.url.startsWith('/api/orders/') && req.url.endsWith('/payment')) {
+    const actor = requireRole(req, res, ['client', 'dispatcher', 'admin']); if (!actor) return;
+    const orderId = req.url.split('/')[3]; const order = readOrders().find(item => item.id === orderId);
+    if (!order || (actor.role === 'client' && order.clientEmail !== actor.email)) return json(res, 403, { error: 'order_owner_required' });
+    const payment = database.findPaymentByOrder(orderId); if (!payment) return json(res, 404, { error: 'payment_not_created' });
+    if (payment.status === 'pending' && Date.parse(payment.expiresAt) <= Date.now()) database.updatePayment(payment.id, { status: 'expired' });
+    return json(res, 200, { payment: paymentResponse(database.findPayment(payment.id)) });
+  }
+  if (req.method === 'POST' && req.url.startsWith('/api/payments/') && req.url.endsWith('/cancel')) {
+    const actor = requireRole(req, res, ['client', 'dispatcher', 'admin']); if (!actor) return;
+    const paymentId = req.url.split('/')[3]; const payment = database.findPayment(paymentId);
+    if (!payment) return json(res, 404, { error: 'payment_not_found' });
+    const order = readOrders().find(item => item.id === payment.orderId);
+    if (actor.role === 'client' && (!order || order.clientEmail !== actor.email)) return json(res, 403, { error: 'order_owner_required' });
+    if (['paid', 'refunded'].includes(payment.status)) return json(res, 409, { error: 'payment_already_final' });
+    const updated = database.updatePayment(paymentId, { status: 'cancelled' });
+    if (order && ['Новый', 'Машина назначена'].includes(order.status)) { order.paymentStatus = 'Платёж отменён'; order.status = 'Аннулирован: платёж отменён'; writeOrders(readOrders().map(item => item.id === order.id ? order : item)); }
+    return json(res, 200, { payment: paymentResponse(updated), order });
+  }
+  if (req.method === 'POST' && req.url.startsWith('/api/payments/') && req.url.endsWith('/refund')) {
+    const actor = requireRole(req, res, ['dispatcher', 'admin']); if (!actor) return;
+    const paymentId = req.url.split('/')[3]; const payment = database.findPayment(paymentId);
+    if (!payment) return json(res, 404, { error: 'payment_not_found' });
+    if (payment.status !== 'paid') return json(res, 409, { error: 'payment_not_refundable' });
+    const updated = database.updatePayment(paymentId, { status: 'refunded', refundedAt: new Date().toISOString() });
+    const orders = readOrders(); const order = orders.find(item => item.id === payment.orderId);
+    if (order) { order.paymentStatus = 'Комиссия возвращена'; order.status = 'Аннулирован: комиссия возвращена'; writeOrders(orders); }
+    return json(res, 200, { payment: paymentResponse(updated), order });
+  }
+  if (req.method === 'POST' && req.url === '/api/payments/webhook') {
+    if (!paymentWebhookSecret) return json(res, 503, { error: 'payment_webhook_secret_not_configured' });
+    try {
+      const payload = await rawBody(req); const signature = String(req.headers['x-payment-signature'] || '');
+      const expected = paymentSignature(payload);
+      if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return json(res, 401, { error: 'invalid_payment_signature' });
+      const data = JSON.parse(payload); const payment = database.findPayment(String(data.paymentId || ''));
+      if (!payment) return json(res, 404, { error: 'payment_not_found' });
+      if (payment.status === 'paid') return json(res, 200, { ok: true, idempotent: true, payment: paymentResponse(payment) });
+      if (payment.status !== 'pending' || Date.parse(payment.expiresAt) <= Date.now()) return json(res, 409, { error: 'payment_expired_or_closed' });
+      const updated = database.updatePayment(payment.id, { status: 'paid', externalId: String(data.externalId || ''), paidAt: new Date().toISOString(), method: data.method === 'qr' ? 'QR-код' : 'Карта' });
+      const orders = readOrders(); const order = orders.find(item => item.id === payment.orderId);
+      if (order) { order.paymentStatus = 'Комиссия оплачена'; order.paymentMethod = updated.method; order.commissionPaidAt = updated.paidAt; order.status = 'Подтверждён клиентом'; writeOrders(orders); }
+      return json(res, 200, { ok: true, payment: paymentResponse(updated), order });
+    } catch { return json(res, 400, { error: 'invalid_webhook' }); }
+  }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/pay-commission')) {
     const actor = requireRole(req, res, ['client']); if (!actor) return;
     const orderId = req.url.split('/')[3]; const data = await body(req); const orders = readOrders(); const order = orders.find(item => item.id === orderId);
     if (!order || order.clientEmail !== actor.email) return json(res, 403, { error: 'order_owner_required' });
     if (order.status !== 'Машина назначена' || Date.now() > Date.parse(order.paymentDeadline)) return json(res, 409, { error: 'payment_window_expired' });
-    Object.assign(order, { paymentStatus: 'Комиссия оплачена', paymentMethod: data.method === 'qr' ? 'QR-код' : 'Карта', commissionPaidAt: new Date().toISOString(), status: 'Подтверждён клиентом' }); writeOrders(orders); return json(res, 200, order);
+    const payment = database.findPaymentByOrder(order.id);
+    if (!payment || payment.status !== 'pending') return json(res, 409, { error: 'payment_not_pending' });
+    if (Date.parse(payment.expiresAt) <= Date.now()) { database.updatePayment(payment.id, { status: 'expired' }); return json(res, 409, { error: 'payment_window_expired' }); }
+    const updated = database.updatePayment(payment.id, { status: 'paid', externalId: `mock-${crypto.randomBytes(5).toString('hex')}`, paidAt: new Date().toISOString(), method: data.method === 'qr' ? 'QR-код' : 'Карта' });
+    Object.assign(order, { paymentStatus: 'Комиссия оплачена', paymentMethod: updated.method, commissionPaidAt: updated.paidAt, status: 'Подтверждён клиентом' }); writeOrders(orders); return json(res, 200, { ...order, payment: paymentResponse(updated) });
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/start')) {
     const actor = requireRole(req, res, ['driver']); if (!actor) return;
@@ -287,7 +354,15 @@ const server = http.createServer(async (req, res) => {
       const driverId = String(data.driverId || '').trim(); const vehiclePlate = String(data.vehiclePlate).trim().toUpperCase();
       const vehicle = database.findDriverVehicle(driverId, vehiclePlate);
       if (!vehicle || `${vehicle.make} ${vehicle.model}`.trim().toLowerCase() !== String(data.vehicle).trim().toLowerCase()) return json(res, 422, { error: 'driver_vehicle_plate_mismatch' });
+      const amountRub = Number(order.commissionRub || 0);
+      if (!Number.isSafeInteger(amountRub) || amountRub <= 0) return json(res, 422, { error: 'commission_amount_unavailable' });
       Object.assign(order, { status: 'Машина назначена', paymentStatus: 'Ожидает оплаты комиссии', paymentMethods: ['Карта', 'QR-код'], paymentDeadline: new Date(Date.now() + 10 * 60_000).toISOString(), vehicle: `${vehicle.make} ${vehicle.model}`, vehiclePlate, driverId: vehicle.id, driverName: vehicle.name, assignedAt: new Date().toISOString() });
+      const payment = database.findPaymentByOrder(order.id);
+      if (!payment || ['expired', 'cancelled', 'refunded'].includes(payment.status)) {
+        const paymentId = `PAY-${crypto.randomBytes(6).toString('hex').toUpperCase()}`;
+        const expiresAt = order.paymentDeadline;
+        database.createPayment({ id: paymentId, orderId: order.id, provider: process.env.PAYMENT_PROVIDER || 'mock', method: null, amountRub, expiresAt, paymentUrl: `/api/payments/${paymentId}/checkout`, qrPayload: `ETT:${paymentId}:${amountRub}` });
+      }
       let telegram = { sent: false, reason: 'telegram_not_configured' };
       try { telegram = await notifyTelegram(order); } catch (error) { console.error(error); telegram = { sent: false, reason: 'telegram_delivery_failed' }; }
       order.telegram = telegram; writeOrders(orders); return json(res, 200, order);

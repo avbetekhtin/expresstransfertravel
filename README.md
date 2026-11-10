@@ -40,6 +40,10 @@ npm start
 
 После входа пользователя с ролью `dispatcher` или `admin` откройте `/dispatcher.html`. Панель показывает заявки и водителей, а назначение принимает только зарегистрированную связку автомобиля и госномера. Серверные операции доступны через `/api/orders/:id/assign`, `/accept`, `/pay-commission`, `/start` и `/complete` с проверкой роли и владельца заказа.
 
+## Платежи
+
+После назначения машины сервер создаёт платёж `pending` на сумму комиссии, `paymentUrl` и `qrPayload` со сроком действия 10 минут. Клиент может получить его через `GET /api/orders/:id/payment` и оплатить в локальном контуре через `POST /api/orders/:id/pay-commission`. Для эквайринга используется `POST /api/payments/webhook`; подпись HMAC SHA-256 передаётся в `X-Payment-Signature`, секрет задаётся `PAYMENT_WEBHOOK_SECRET`. Повторный webhook безопасен и возвращает `idempotent: true`. Отмена: `POST /api/payments/:id/cancel`, возврат staff-ролью: `POST /api/payments/:id/refund`.
+
 ## Локальный OSRM без ключа
 
 Сервер использует только локальный OSRM по `OSRM_URL`. Docker в текущем окружении не установлен, поэтому контейнер нужно подготовить на машине с Docker:

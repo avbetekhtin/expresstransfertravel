@@ -40,7 +40,8 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
     CREATE TABLE IF NOT EXISTS payments (
       id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
       provider TEXT, method TEXT, amount_rub INTEGER NOT NULL, status TEXT NOT NULL,
-      external_id TEXT, paid_at TEXT, created_at TEXT NOT NULL
+      external_id TEXT, paid_at TEXT, expires_at TEXT, payment_url TEXT, qr_payload TEXT,
+      refunded_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
     CREATE INDEX IF NOT EXISTS idx_orders_client_email ON orders(client_email);
@@ -50,6 +51,15 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
   for (const statement of [
     'ALTER TABLE users ADD COLUMN password_hash TEXT',
     'ALTER TABLE users ADD COLUMN verified_at TEXT'
+  ]) {
+    try { db.exec(statement); } catch (error) { if (!String(error.message).includes('duplicate column name')) throw error; }
+  }
+  for (const statement of [
+    'ALTER TABLE payments ADD COLUMN expires_at TEXT',
+    'ALTER TABLE payments ADD COLUMN payment_url TEXT',
+    'ALTER TABLE payments ADD COLUMN qr_payload TEXT',
+    'ALTER TABLE payments ADD COLUMN refunded_at TEXT',
+    'ALTER TABLE payments ADD COLUMN updated_at TEXT'
   ]) {
     try { db.exec(statement); } catch (error) { if (!String(error.message).includes('duplicate column name')) throw error; }
   }
@@ -113,6 +123,25 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
         v.plate, v.car_class AS carClass, v.status AS vehicleStatus
         FROM users u JOIN vehicles v ON v.driver_id=u.id
         WHERE u.id=? AND u.role='driver' AND upper(v.plate)=upper(?)`).get(driverId, plate);
+    },
+    createPayment({ id, orderId, provider, method, amountRub, expiresAt, paymentUrl, qrPayload }) {
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO payments (id,order_id,provider,method,amount_rub,status,expires_at,payment_url,qr_payload,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id, orderId, provider, method || null, amountRub, 'pending', expiresAt, paymentUrl, qrPayload, now, now);
+      return this.findPayment(id);
+    },
+    findPayment(id) {
+      return db.prepare(`SELECT id,order_id AS orderId,provider,method,amount_rub AS amountRub,status,external_id AS externalId,
+        paid_at AS paidAt,expires_at AS expiresAt,payment_url AS paymentUrl,qr_payload AS qrPayload,refunded_at AS refundedAt,
+        created_at AS createdAt,updated_at AS updatedAt FROM payments WHERE id=?`).get(id);
+    },
+    findPaymentByOrder(orderId) { return db.prepare(`SELECT id,order_id AS orderId,provider,method,amount_rub AS amountRub,status,external_id AS externalId,paid_at AS paidAt,expires_at AS expiresAt,payment_url AS paymentUrl,qr_payload AS qrPayload,refunded_at AS refundedAt,created_at AS createdAt,updated_at AS updatedAt FROM payments WHERE order_id=? ORDER BY created_at DESC LIMIT 1`).get(orderId); },
+    updatePayment(id, patch) {
+      const payment = this.findPayment(id); if (!payment) return null;
+      const next = { ...payment, ...patch, updatedAt: new Date().toISOString() };
+      db.prepare(`UPDATE payments SET method=?,status=?,external_id=?,paid_at=?,expires_at=?,payment_url=?,qr_payload=?,refunded_at=?,updated_at=? WHERE id=?`)
+        .run(next.method || null, next.status, next.externalId || null, next.paidAt || null, next.expiresAt || null, next.paymentUrl || null, next.qrPayload || null, next.refundedAt || null, next.updatedAt, id);
+      return this.findPayment(id);
     },
     createUser({ id, role, email, name, phone, passwordHash, verifiedAt, car, plate }) {
       db.prepare(`INSERT INTO users (id,role,email,full_name,phone,status,services_json,tariffs_json,password_hash,verified_at,created_at)
