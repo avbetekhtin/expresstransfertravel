@@ -1,22 +1,29 @@
 [
   {
     "category": "Эконом",
-    "description": "Бюджетные решения. Базовый комфорт, экономичность, доступные запчасти. Основа таксопарков и первого автомобиля.",
-    "models": "Lada\" (Granta"
+    "description": "Бюджетные решения. Базовый комфорт, экономичность, доступные запчасти.",
+    "models": "Lada, Chery, Geely, Changan, JAC, Kia, Hyundai, Renault, Nissan, Ravon"
   },
   {
     "category": "Стандарт",
-    "description": "«Золотая середина». Баланс цены, оснащения, безопасности и стоимости владения. Самые популярные семейные и городские авто.",
-    "models": "Moskvich\" (3"
+    "description": "Баланс цены, оснащения, безопасности и стоимости владения.",
+    "models": "Moskvich, Haval, Omoda, Jetour, BAIC, FAW, Dongfeng, GAC, Kaiyi, Jaecoo, Geely, Chery, Kia, Hyundai, Volkswagen, Skoda, Toyota, Nissan, Mazda, Mitsubishi, Suzuki"
   },
   {
     "category": "Комфорт",
-    "description": "Премиальные материалы, просторный салон, продвинутые мультимедиа, системы помощи водителю (ADAS), мощные двигатели.",
-    "models": "Exeed\" (TXL"
+    "description": "Премиальные материалы, просторный салон и продвинутые системы помощи водителю.",
+    "models": "Exeed, Tank, Zeekr, Lixiang, Avatr, Voyah, Hongqi, Geely, Chery, Changan, Kia, Hyundai, Toyota, BMW, Mercedes-Benz, Audi, Volvo, Lexus, Genesis, Land Rover, Porsche"
+  },
+  {
+    "category": "Минивэн 6 мест",
+    "capacity": 6,
+    "description": "Пассажирский минивэн для группы до 6 человек с багажом. Вместимость подтверждается по документам автомобиля.",
+    "models": "Mercedes-Benz V-Class (6), Toyota Alphard (6), Kia Carnival (6), Hyundai Staria (6)"
+  },
+  {
+    "category": "Минивэн 8 мест",
+    "capacity": 8,
+    "description": "Пассажирский минивэн для группы до 8 человек с багажом. Вместимость подтверждается по документам автомобиля.",
+    "models": "Mercedes-Benz Vito (8), Mercedes-Benz V-Class (8), Volkswagen Caravelle (8), Hyundai Staria (8), Ford Transit Custom (8)"
   }
-]
-[
-  {"category":"Эконом","description":"Бюджетные решения. Базовый комфорт, экономичность, доступные запчасти.","models":"Lada, Chery, Geely, Changan, JAC, Kia, Hyundai, Renault, Nissan, Ravon"},
-  {"category":"Стандарт","description":"Баланс цены, оснащения, безопасности и стоимости владения.","models":"Moskvich, Haval, Omoda, Jetour, BAIC, FAW, Dongfeng, GAC, Kaiyi, Jaecoo, Geely, Chery, Kia, Hyundai, Volkswagen, Skoda, Toyota, Nissan, Mazda, Mitsubishi, Suzuki"},
-  {"category":"Комфорт","description":"Премиальные материалы, просторный салон и продвинутые системы помощи водителю.","models":"Exeed, Tank, Zeekr, Lixiang, Avatr, Voyah, Hongqi, Geely, Chery, Changan, Kia, Hyundai, Toyota, BMW, Mercedes-Benz, Audi, Volvo, Lexus, Genesis, Land Rover, Porsche"}
 ]

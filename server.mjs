@@ -74,7 +74,13 @@ function readFixedDirections() { return { directions: database.listDirections(),
 function readCarClassification() { return JSON.parse(fs.readFileSync(carClassificationFile, 'utf8')); }
 function classifyCar(make, model) {
   const text = `${make || ''} ${model || ''}`.toLowerCase();
-  return readCarClassification().find(item => item.models.toLowerCase().split(', ').some(brand => text.includes(brand.toLowerCase())))?.category || null;
+  const classification = readCarClassification();
+  const capacity = text.match(/(?:^|\s)(6|8)(?:\s|-|$)/)?.[1];
+  if (capacity) {
+    const minivan = classification.find(item => item.category === `Минивэн ${capacity} мест`);
+    if (minivan && minivan.models.toLowerCase().split(', ').some(modelName => text.includes(modelName.split(' (')[0].toLowerCase()))) return minivan.category;
+  }
+  return classification.find(item => !item.category.startsWith('Минивэн') && item.models.toLowerCase().split(', ').some(brand => text.includes(brand.toLowerCase())))?.category || null;
 }
 
 function hashPassword(password) {
