@@ -4,11 +4,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import nodemailer from 'nodemailer';
+import { createDatabase } from './db.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 8787);
 const testAuth = String(process.env.TEST_AUTH_MODE || 'false') === 'true';
 const codes = new Map();
+const sessions = new Map();
+const sessionTtlMs = 7 * 24 * 60 * 60_000;
 const dataDir = path.join(root, 'data');
 const usersFile = path.join(dataDir, 'test-users.json');
 const ordersFile = path.join(dataDir, 'orders.json');
@@ -40,29 +43,55 @@ fs.mkdirSync(dataDir, { recursive: true });
 if (!fs.existsSync(usersFile)) fs.writeFileSync(usersFile, JSON.stringify(seedUsers, null, 2), 'utf8');
 if (!fs.existsSync(ordersFile)) fs.writeFileSync(ordersFile, '[]', 'utf8');
 if (!fs.existsSync(platformDbFile)) fs.writeFileSync(platformDbFile, JSON.stringify({ schemaVersion: 1, updatedAt: new Date().toISOString().slice(0, 10), drivers: [], clients: [], districts: [{ id: 'central', name: 'Центральный район', tripPriceRub: null }, { id: 'moscow', name: 'Московский район', tripPriceRub: null }, { id: 'leningrad', name: 'Ленинградский район', tripPriceRub: null }, { id: 'october', name: 'Октябрьский район', tripPriceRub: null }], streets: [], orders: [] }, null, 2), 'utf8');
-function readUsers() { return JSON.parse(fs.readFileSync(usersFile, 'utf8')); }
-function writeUsers(data) { fs.writeFileSync(usersFile, JSON.stringify(data, null, 2), 'utf8'); }
-function readOrders() {
-  const orders = JSON.parse(fs.readFileSync(ordersFile, 'utf8'));
-  let changed = false;
-  for (const order of orders) {
-    if (order.status === 'Машина назначена' && order.paymentStatus === 'Ожидает оплаты комиссии' && order.paymentDeadline && Date.now() > Date.parse(order.paymentDeadline)) {
-      order.status = 'Аннулирован: комиссия не оплачена';
-      order.cancelledAt = new Date().toISOString();
-      changed = true;
-    }
-  }
-  if (changed) writeOrders(orders);
-  return orders;
-}
-function writeOrders(data) { fs.writeFileSync(ordersFile, JSON.stringify(data, null, 2), 'utf8'); }
-function readPlatformDb() { return JSON.parse(fs.readFileSync(platformDbFile, 'utf8')); }
-function writePlatformDb(data) { fs.writeFileSync(platformDbFile, JSON.stringify(data, null, 2), 'utf8'); }
-function readFixedDirections() { return JSON.parse(fs.readFileSync(fixedDirectionsFile, 'utf8')); }
+const database = createDatabase({ dataDir, usersFile, ordersFile, platformDbFile, fixedDirectionsFile });
+function readUsers() { return database.readUsers(); }
+function writeUsers(data) { return database.resetUsers(data); }
+function readOrders() { return database.readOrders(); }
+function writeOrders(data) { return database.writeOrders(data); }
+function readPlatformDb() { return { districts: database.readDistricts(), streets: [] }; }
+function writePlatformDb() { throw new Error('platform database is managed by SQLite'); }
+function readFixedDirections() { return { directions: database.listDirections(), prices: {} }; }
 function readCarClassification() { return JSON.parse(fs.readFileSync(carClassificationFile, 'utf8')); }
 function classifyCar(make, model) {
   const text = `${make || ''} ${model || ''}`.toLowerCase();
   return readCarClassification().find(item => item.models.toLowerCase().split(', ').some(brand => text.includes(brand.toLowerCase())))?.category || null;
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`;
+}
+
+function verifyPassword(password, encoded) {
+  const [salt, expected] = String(encoded || '').split(':');
+  if (!salt || !expected) return false;
+  const actual = crypto.scryptSync(password, salt, 64).toString('hex');
+  return actual.length === expected.length && crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+}
+
+function parseCookies(req) {
+  return Object.fromEntries(String(req.headers.cookie || '').split(';').map(item => item.trim().split('=').map(decodeURIComponent)).filter(item => item.length === 2));
+}
+
+function currentUser(req) {
+  const token = parseCookies(req).ett_session;
+  const session = sessions.get(token);
+  if (!session || session.expiresAt < Date.now()) { if (token) sessions.delete(token); return null; }
+  return database.findUserByEmail(session.email);
+}
+
+function publicUser(user) {
+  if (!user) return null;
+  return { id: user.id, role: user.role, email: user.email, name: user.name, phone: user.phone, city: user.city, status: user.status, car: user.car, plate: user.plate };
+}
+
+function setSession(req, token) { return { 'Set-Cookie': `ett_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(sessionTtlMs / 1000)}` }; }
+
+function requireRole(req, res, roles) {
+  const user = currentUser(req);
+  if (!user) { json(res, 401, { error: 'authentication_required' }); return null; }
+  if (!roles.includes(user.role)) { json(res, 403, { error: 'insufficient_role' }); return null; }
+  return user;
 }
 
 async function notifyTelegram(order) {
@@ -98,7 +127,7 @@ async function notifyTripReport(order) {
 async function calculateOsrmRoute(from, to) {
   const fixed = readFixedDirections();
   const fixedKey = `${String(from).trim().toLowerCase()}→${String(to).trim().toLowerCase()}`;
-  const fixedPrice = fixed.prices?.[fixedKey];
+  const fixedPrice = database.findTariff(fixedKey);
   if (fixedPrice) return { available: true, provider: 'fixed-table', pricing: 'fixed', from, to, basePriceRub: fixedPrice.standard, commissionRub: Math.round(fixedPrice.standard * platformCommissionRate), clientTotalRub: fixedPrice.standard + Math.round(fixedPrice.standard * platformCommissionRate), prices: fixedPrice, pricingRule: 'fixed price from Excel + 20% platform commission' };
   if (fixed.directions.includes(to)) return { available: false, reason: 'fixed_price_not_set', pricing: 'fixed', from, to };
   const a = knownPlaces[from]; const b = knownPlaces[to];
@@ -124,8 +153,8 @@ const transporter = nodemailer.createTransport({
   auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
 });
 
-function json(res, status, body) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+function json(res, status, body, headers = {}) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', ...headers });
   res.end(JSON.stringify(body));
 }
 
@@ -141,7 +170,27 @@ function body(req) {
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return json(res, 204, {});
   if (req.method === 'GET' && req.url === '/api/test-users') return json(res, 200, readUsers());
-  if (req.method === 'GET' && req.url === '/api/orders') return json(res, 200, readOrders());
+  if (req.method === 'GET' && req.url === '/api/users') {
+    if (!requireRole(req, res, ['admin', 'dispatcher'])) return;
+    return json(res, 200, { users: database.listUsers() });
+  }
+  if (req.method === 'GET' && req.url === '/api/tariffs') return json(res, 200, { tariffs: database.listTariffs(), directions: database.listDirections() });
+  if (req.method === 'POST' && req.url === '/api/admin/tariffs/import') {
+    if (!requireRole(req, res, ['admin', 'dispatcher'])) return;
+    try {
+      const data = await body(req);
+      if (!Array.isArray(data.rows) || data.rows.length === 0 || data.rows.length > 5000) return json(res, 400, { error: 'rows_array_required' });
+      const result = database.importTariffs(data.rows);
+      return json(res, result.errors.length ? 422 : 200, result);
+    } catch { return json(res, 400, { error: 'invalid_request' }); }
+  }
+  if (req.method === 'GET' && req.url === '/api/orders') {
+    const actor = requireRole(req, res, ['client', 'driver', 'dispatcher', 'admin']); if (!actor) return;
+    const orders = readOrders();
+    if (actor.role === 'client') return json(res, 200, orders.filter(order => order.clientEmail === actor.email));
+    if (actor.role === 'driver') return json(res, 200, orders.filter(order => !order.driverId || order.driverId === actor.id));
+    return json(res, 200, orders);
+  }
   if (req.method === 'GET' && req.url === '/api/car-classification') return json(res, 200, readCarClassification());
   if (req.method === 'GET' && req.url === '/api/districts') return json(res, 200, readPlatformDb().districts);
   if (req.method === 'GET' && req.url === '/api/streets') return json(res, 200, readPlatformDb().streets);
@@ -156,6 +205,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === 'POST' && req.url === '/api/orders') {
     try {
+      const actor = requireRole(req, res, ['client']); if (!actor) return;
       const data = await body(req);
       if (!data.from || !data.to || !data.clientEmail) return json(res, 400, { error: 'missing_order_fields' });
       let route = null;
@@ -170,21 +220,25 @@ const server = http.createServer(async (req, res) => {
     } catch { return json(res, 400, { error: 'invalid_request' }); }
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/accept')) {
+    const actor = requireRole(req, res, ['driver']); if (!actor) return;
     const orderId = req.url.split('/')[3]; const data = await body(req); const orders = readOrders(); const order = orders.find(item => item.id === orderId);
     if (!order || order.status !== 'Новый') return json(res, 409, { error: 'order_not_available' });
-    Object.assign(order, { status: 'Принят водителем', acceptedAt: new Date().toISOString(), driverId: data.driverId || '', driverName: data.driverName || '' }); writeOrders(orders); return json(res, 200, order);
+    Object.assign(order, { status: 'Принят водителем', acceptedAt: new Date().toISOString(), driverId: actor.id, driverName: actor.name }); writeOrders(orders); return json(res, 200, order);
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/pay-commission')) {
+    const actor = requireRole(req, res, ['client']); if (!actor) return;
     const orderId = req.url.split('/')[3]; const data = await body(req); const orders = readOrders(); const order = orders.find(item => item.id === orderId);
     if (!order || order.status !== 'Машина назначена' || Date.now() > Date.parse(order.paymentDeadline)) return json(res, 409, { error: 'payment_window_expired' });
     Object.assign(order, { paymentStatus: 'Комиссия оплачена', paymentMethod: data.method === 'qr' ? 'QR-код' : 'Карта', commissionPaidAt: new Date().toISOString(), status: 'Подтверждён клиентом' }); writeOrders(orders); return json(res, 200, order);
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/start')) {
+    const actor = requireRole(req, res, ['driver']); if (!actor) return;
     const orderId = req.url.split('/')[3]; const orders = readOrders(); const order = orders.find(item => item.id === orderId);
     if (!order || order.status !== 'Подтверждён клиентом' || order.paymentStatus !== 'Комиссия оплачена') return json(res, 409, { error: 'order_not_ready_to_start' });
     Object.assign(order, { status: 'В поездке', tripStartedAt: new Date().toISOString() }); writeOrders(orders); return json(res, 200, order);
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/complete')) {
+    const actor = requireRole(req, res, ['driver']); if (!actor) return;
     const orderId = req.url.split('/')[3]; const data = await body(req); const orders = readOrders(); const order = orders.find(item => item.id === orderId);
     if (!order || order.status !== 'В поездке') return json(res, 409, { error: 'order_not_in_trip' });
     Object.assign(order, { status: 'Завершён', tripCompletedAt: new Date().toISOString(), report: String(data.report || 'Поездка завершена без замечаний') });
@@ -193,6 +247,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/assign')) {
     try {
+      const actor = requireRole(req, res, ['dispatcher', 'admin']); if (!actor) return;
       const orderId = req.url.split('/')[3]; const data = await body(req); const orders = readOrders();
       const order = orders.find(item => item.id === orderId);
       if (!order || !data.vehicle || !data.vehiclePlate) return json(res, 400, { error: 'order_or_vehicle_plate_not_found' });
@@ -208,11 +263,18 @@ const server = http.createServer(async (req, res) => {
       const data = await body(req);
       const email = String(data.email || '').trim().toLowerCase();
       if (!/^\S+@\S+\.\S+$/.test(email)) return json(res, 400, { error: 'invalid_email' });
+      const requestedRole = String(data.role || 'client');
+      const staffBootstrap = ['admin', 'dispatcher'].includes(requestedRole) && process.env.STAFF_BOOTSTRAP_TOKEN && data.bootstrapToken === process.env.STAFF_BOOTSTRAP_TOKEN;
+      const role = req.url.includes('/client/') ? 'client' : (['client', 'driver'].includes(requestedRole) || staffBootstrap ? requestedRole : 'client');
+      if (['admin', 'dispatcher'].includes(requestedRole) && !staffBootstrap) return json(res, 403, { error: 'staff_bootstrap_required' });
+      if (data.password != null && String(data.password).length < 8) return json(res, 400, { error: 'weak_password' });
+      const existing = database.findUserByEmail(email);
+      if (existing && existing.verified_at) return json(res, 409, { error: 'email_already_registered' });
       const localDemo = testAuth && email.endsWith('@example.com');
       if (!localDemo && (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS || !process.env.MAIL_FROM)) return json(res, 503, { error: 'smtp_not_configured' });
       const code = localDemo ? '000000' : String(crypto.randomInt(100000, 1000000));
       const requestId = crypto.randomUUID();
-      codes.set(requestId, { email, code, expires: Date.now() + 10 * 60_000 });
+      codes.set(requestId, { email, code, role, name: String(data.name || '').trim(), phone: String(data.phone || '').trim(), car: String(data.car || '').trim(), plate: String(data.plate || '').trim(), passwordHash: hashPassword(String(data.password || (localDemo ? 'demo1234' : crypto.randomBytes(18).toString('base64url')))), expires: Date.now() + 10 * 60_000 });
       if (!localDemo) await transporter.sendMail({ from: process.env.MAIL_FROM, to: email, subject: 'Код подтверждения — Экспресс Трансфер Трэвел', text: `Ваш код подтверждения: ${code}. Код действует 10 минут.` });
       return json(res, 200, { requestId, testMode: localDemo, ...(localDemo ? { testCode: code } : {}) });
     } catch (error) {
@@ -226,8 +288,28 @@ const server = http.createServer(async (req, res) => {
       const record = codes.get(String(data.requestId || ''));
       if (!record || record.expires < Date.now() || record.email !== String(data.email || '').trim().toLowerCase() || record.code !== String(data.code || '')) return json(res, 400, { error: 'invalid_or_expired_code' });
       codes.delete(String(data.requestId));
-      return json(res, 200, { verified: true });
+      const existing = database.findUserByEmail(record.email);
+      const user = existing
+        ? database.setUserCredentials(record.email, { passwordHash: record.passwordHash, verifiedAt: new Date().toISOString(), role: record.role, name: record.name, phone: record.phone })
+        : database.createUser({ id: `${record.role === 'driver' ? 'DRV' : 'CLI'}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`, role: record.role, email: record.email, name: record.name || record.email.split('@')[0], phone: record.phone, passwordHash: record.passwordHash, verifiedAt: new Date().toISOString(), car: record.car, plate: record.plate });
+      const token = crypto.randomBytes(32).toString('base64url'); sessions.set(token, { email: record.email, expiresAt: Date.now() + sessionTtlMs });
+      return json(res, 200, { verified: true, user: publicUser(user) }, { 'Set-Cookie': `ett_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(sessionTtlMs / 1000)}` });
     } catch { return json(res, 400, { error: 'invalid_request' }); }
+  }
+  if (req.method === 'POST' && req.url === '/api/auth/login') {
+    try {
+      const data = await body(req); const email = String(data.email || '').trim().toLowerCase(); const password = String(data.password || '');
+      const user = database.findUserByEmail(email);
+      if (!user || !user.verified_at || !verifyPassword(password, user.password_hash)) return json(res, 401, { error: 'invalid_credentials' });
+      if (data.role && data.role !== user.role) return json(res, 403, { error: 'role_mismatch' });
+      const token = crypto.randomBytes(32).toString('base64url'); sessions.set(token, { email, expiresAt: Date.now() + sessionTtlMs });
+      return json(res, 200, { user: publicUser(user) }, setSession(req, token));
+    } catch { return json(res, 400, { error: 'invalid_request' }); }
+  }
+  if (req.method === 'GET' && req.url === '/api/auth/me') return json(res, 200, { user: publicUser(currentUser(req)) });
+  if (req.method === 'POST' && req.url === '/api/auth/logout') {
+    const token = parseCookies(req).ett_session; if (token) sessions.delete(token);
+    return json(res, 200, { loggedOut: true }, { 'Set-Cookie': 'ett_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0' });
   }
   if (req.method === 'GET') {
     const file = req.url === '/' ? '/index.html' : req.url;
