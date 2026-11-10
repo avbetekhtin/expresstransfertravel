@@ -20,6 +20,13 @@ const fixedDirectionsFile = path.join(dataDir, 'fixed-directions.json');
 const carClassificationFile = path.join(dataDir, 'car-classification.json');
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN || '';
 const telegramChatId = process.env.TELEGRAM_CHAT_ID || '';
+const telegramChats = {
+  client: process.env.TELEGRAM_CLIENT_CHAT_ID || telegramChatId,
+  driver: process.env.TELEGRAM_DRIVER_CHAT_ID || telegramChatId,
+  dispatcher: process.env.TELEGRAM_DISPATCHER_CHAT_ID || telegramChatId,
+  admin: process.env.TELEGRAM_ADMIN_CHAT_ID || telegramChatId
+};
+const telegramMaxAttempts = 3;
 const osrmUrl = (process.env.OSRM_URL || 'http://localhost:5000').replace(/\/$/, '');
 const distanceRateRub = 75;
 const platformCommissionRate = 0.2;
@@ -112,34 +119,37 @@ function validateCoordinates(point) {
   return Number.isFinite(lat) && Number.isFinite(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
 }
 
-async function notifyTelegram(order) {
-  if (!telegramToken || !telegramChatId) return { sent: false, reason: 'telegram_not_configured' };
-  const text = [
-    '🚘 Вам назначен автомобиль:',
-    `Заказ: ${order.id}`,
-    `Маршрут: ${order.from} → ${order.to}`,
-    `Дата и время: ${order.date || 'не указано'} ${order.time || ''}`,
-    `Клиент: ${order.clientName || order.clientEmail || 'не указан'}`,
-    `Автомобиль: ${order.vehicle}`,
-    `Гос. номер: ${order.vehiclePlate}`,
-    `Водитель: ${order.driverName || order.driverId || 'не указан'}`
-  ].join('\n');
-  const response = await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: telegramChatId, text })
-  });
-  if (!response.ok) throw new Error(`telegram_http_${response.status}`);
-  const payload = await response.json();
-  if (!payload.ok) throw new Error('telegram_api_error');
-  return { sent: true };
+async function deliverTelegramEvent(event) {
+  if (!telegramToken || !event.chatId) return database.updateTelegramEvent(event.id, { status: 'skipped', lastError: 'telegram_not_configured' });
+  let lastError = null;
+  for (let attempt = event.attempts; attempt < telegramMaxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: event.chatId, text: String(event.payload.text || '').slice(0, 4096), protect_content: true }), signal: AbortSignal.timeout(8000) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) throw new Error(`telegram_delivery_${response.status}`);
+      return database.updateTelegramEvent(event.id, { status: 'sent', attempts: attempt + 1, sentAt: new Date().toISOString(), lastError: null });
+    } catch (error) { lastError = String(error.message).slice(0, 120); database.updateTelegramEvent(event.id, { attempts: attempt + 1, lastError }); }
+  }
+  return database.updateTelegramEvent(event.id, { status: 'failed', lastError });
+}
+
+async function notifyTelegramRoles(order, eventType, text, roles) {
+  const results = [];
+  for (const role of roles) {
+    const event = database.createTelegramEvent({ orderId: order.id, eventType, role, chatId: telegramChats[role] || null, payload: { text } });
+    results.push(await deliverTelegramEvent(event));
+  }
+  return { sent: results.some(item => item.status === 'sent'), events: results.map(item => ({ id: item.id, role: item.role, status: item.status, attempts: item.attempts, reason: item.lastError || undefined })) };
+}
+
+async function notifyAssignment(order) {
+  const text = ['🚘 Назначен автомобиль', `Заказ: ${order.id}`, `Маршрут: ${order.from} → ${order.to}`, `Дата и время: ${order.date || 'не указано'} ${order.time || ''}`, `Клиент: ${order.clientName || order.clientEmail || 'не указан'}`, `Автомобиль: ${order.vehicle}`, `Гос. номер: ${order.vehiclePlate}`, `Водитель: ${order.driverName || order.driverId || 'не указан'}`].join('\n');
+  return notifyTelegramRoles(order, 'vehicle_assigned', text, ['client', 'driver', 'dispatcher']);
 }
 
 async function notifyTripReport(order) {
-  if (!telegramToken || !telegramChatId) return { sent: false, reason: 'telegram_not_configured' };
   const text = ['✅ Поездка завершена', `Заказ: ${order.id}`, `Маршрут: ${order.from} → ${order.to}`, `Клиент: ${order.clientName || order.clientEmail}`, `Автомобиль: ${order.vehicle}`, `Гос. номер: ${order.vehiclePlate}`, `Водитель: ${order.driverName || order.driverId}`, `Начало: ${order.tripStartedAt}`, `Завершение: ${order.tripCompletedAt}`, `Отчёт: ${order.report || 'без комментария'}`].join('\n');
-  const response = await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: telegramChatId, text }) });
-  if (!response.ok || !(await response.json()).ok) throw new Error('telegram_report_failed');
-  return { sent: true };
+  return notifyTelegramRoles(order, 'trip_completed', text, ['client', 'dispatcher', 'admin']);
 }
 
 async function calculateOsrmRoute(from, to) {
@@ -212,6 +222,18 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { users: database.listUsers() });
   }
   if (req.method === 'GET' && req.url === '/api/tariffs') return json(res, 200, { tariffs: database.listTariffs(), directions: database.listDirections() });
+  if (req.method === 'GET' && req.url.startsWith('/api/telegram/events')) {
+    if (!requireRole(req, res, ['dispatcher', 'admin'])) return;
+    const query = new URL(req.url, `http://${req.headers.host}`); return json(res, 200, { events: database.listTelegramEvents(query.searchParams.get('orderId') || null) });
+  }
+  if (req.method === 'POST' && req.url.startsWith('/api/telegram/events/') && req.url.endsWith('/retry')) {
+    if (!requireRole(req, res, ['dispatcher', 'admin'])) return;
+    const eventId = Number(req.url.split('/')[4]); const event = database.findTelegramEvent(eventId);
+    if (!event) return json(res, 404, { error: 'telegram_event_not_found' });
+    if (event.status === 'sent') return json(res, 409, { error: 'telegram_event_already_sent' });
+    const retried = await deliverTelegramEvent(database.updateTelegramEvent(eventId, { status: 'pending', lastError: null }));
+    return json(res, 200, { event: retried });
+  }
   if (req.method === 'GET' && req.url.startsWith('/api/geocode?')) {
     const query = new URL(req.url, `http://${req.headers.host}`); const place = geocodePlace(query.searchParams.get('q'));
     return place ? json(res, 200, { available: true, result: place }) : json(res, 404, { available: false, error: 'place_not_found' });
@@ -364,7 +386,7 @@ const server = http.createServer(async (req, res) => {
         database.createPayment({ id: paymentId, orderId: order.id, provider: process.env.PAYMENT_PROVIDER || 'mock', method: null, amountRub, expiresAt, paymentUrl: `/api/payments/${paymentId}/checkout`, qrPayload: `ETT:${paymentId}:${amountRub}` });
       }
       let telegram = { sent: false, reason: 'telegram_not_configured' };
-      try { telegram = await notifyTelegram(order); } catch (error) { console.error(error); telegram = { sent: false, reason: 'telegram_delivery_failed' }; }
+      try { telegram = await notifyAssignment(order); } catch (error) { console.error(error); telegram = { sent: false, reason: 'telegram_delivery_failed' }; }
       order.telegram = telegram; writeOrders(orders); return json(res, 200, order);
     } catch { return json(res, 400, { error: 'invalid_request' }); }
   }
