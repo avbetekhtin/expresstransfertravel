@@ -26,6 +26,10 @@ const telegramChats = {
   admin: process.env.TELEGRAM_ADMIN_CHAT_ID || telegramChatId
 };
 const telegramMaxAttempts = 3;
+const maxBotToken = process.env.MAX_BOT_TOKEN || '';
+const maxChatId = process.env.MAX_CHAT_ID || '';
+const maxChats = { client: process.env.MAX_CLIENT_CHAT_ID || maxChatId, driver: process.env.MAX_DRIVER_CHAT_ID || maxChatId, dispatcher: process.env.MAX_DISPATCHER_CHAT_ID || maxChatId, admin: process.env.MAX_ADMIN_CHAT_ID || maxChatId };
+const maxMaxAttempts = 3;
 const osrmUrl = (process.env.OSRM_URL || 'http://localhost:5000').replace(/\/$/, '');
 const distanceRateRub = 75;
 const platformCommissionRate = 0.2;
@@ -178,6 +182,35 @@ async function notifyTripReport(order) {
   return notifyTelegramRoles(order, 'trip_completed', text, ['client', 'dispatcher', 'admin']);
 }
 
+async function deliverMaxEvent(event, text) {
+  if (!maxBotToken || !event.chatId) return database.updateMaxEvent(event.id, { status: 'skipped', lastError: 'max_not_configured' });
+  let lastError = null;
+  for (let attempt = event.attempts; attempt < maxMaxAttempts; attempt += 1) {
+    try {
+      const url = `https://platform-api.max.ru/messages?chat_id=${encodeURIComponent(event.chatId)}`;
+      const response = await fetch(url, { method: 'POST', headers: { Authorization: maxBotToken, 'Content-Type': 'application/json' }, body: JSON.stringify({ text: String(text).slice(0, 4000) }), signal: AbortSignal.timeout(8000) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(`max_delivery_${response.status}_${payload.code || 'error'}`);
+      return database.updateMaxEvent(event.id, { status: 'sent', attempts: attempt + 1, sentAt: new Date().toISOString(), lastError: null });
+    } catch (error) { lastError = String(error.message).slice(0, 160); database.updateMaxEvent(event.id, { attempts: attempt + 1, lastError }); }
+  }
+  return database.updateMaxEvent(event.id, { status: 'failed', lastError });
+}
+
+async function notifyMaxRoles(order, eventType, text, roles) {
+  const results = [];
+  for (const role of roles) { const event = database.createMaxEvent({ orderId: order.id, eventType, chatId: maxChats[role] || null }); results.push(await deliverMaxEvent(event, text)); }
+  return { sent: results.some(item => item.status === 'sent'), events: results.map(item => ({ id: item.id, status: item.status, attempts: item.attempts, reason: item.lastError || undefined })) };
+}
+
+async function notifyMaxAssignment(order) {
+  return notifyMaxRoles(order, 'vehicle_assigned', ['🚘 Назначен автомобиль', `Заказ: ${order.id}`, `Маршрут: ${order.from} → ${order.to}`, `Автомобиль: ${order.vehicle}`, `Гос. номер: ${order.vehiclePlate}`, `Водитель: ${order.driverName || order.driverId}`].join('\n'), ['client', 'driver', 'dispatcher']);
+}
+
+async function notifyMaxTripReport(order) {
+  return notifyMaxRoles(order, 'trip_completed', ['✅ Поездка завершена', `Заказ: ${order.id}`, `Маршрут: ${order.from} → ${order.to}`, `Отчёт: ${order.report || 'без комментария'}`].join('\n'), ['client', 'dispatcher', 'admin']);
+}
+
 async function calculateOsrmRoute(from, to) {
   const fixed = readFixedDirections();
   const fromPlace = geocodePlace(from);
@@ -307,6 +340,10 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && req.url.startsWith('/api/telegram/events')) {
     if (!requireRole(req, res, ['dispatcher', 'admin'])) return;
     const query = new URL(req.url, `http://${req.headers.host}`); return json(res, 200, { events: database.listTelegramEvents(query.searchParams.get('orderId') || null) });
+  }
+  if (req.method === 'GET' && req.url.startsWith('/api/max/events')) {
+    if (!requireRole(req, res, ['dispatcher', 'admin'])) return;
+    const query = new URL(req.url, `http://${req.headers.host}`); return json(res, 200, { events: database.listMaxEvents(query.searchParams.get('orderId') || null) });
   }
   if (req.method === 'POST' && req.url.startsWith('/api/telegram/events/') && req.url.endsWith('/retry')) {
     if (!requireRole(req, res, ['dispatcher', 'admin'])) return;
@@ -449,6 +486,7 @@ async function handleRequest(req, res) {
     if (order.status !== 'В поездке') return json(res, 409, { error: 'order_not_in_trip' });
     Object.assign(order, { status: 'Завершён', tripCompletedAt: new Date().toISOString(), report: String(data.report || 'Поездка завершена без замечаний') });
     try { order.telegramReport = await notifyTripReport(order); } catch { order.telegramReport = { sent: false, reason: 'telegram_delivery_failed' }; }
+    try { order.maxReport = await notifyMaxTripReport(order); } catch { order.maxReport = { sent: false, reason: 'max_delivery_failed' }; }
     writeOrders(orders); audit(req, actor, 'trip.complete', 'order', order.id, { report: order.report }); return json(res, 200, order);
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/assign')) {
@@ -472,9 +510,11 @@ async function handleRequest(req, res) {
       }
       let telegram = { sent: false, reason: 'telegram_not_configured' };
       try { telegram = await notifyAssignment(order); } catch (error) { console.error(error); telegram = { sent: false, reason: 'telegram_delivery_failed' }; }
+      let max = { sent: false, reason: 'max_not_configured' };
+      try { max = await notifyMaxAssignment(order); } catch (error) { console.error(error); max = { sent: false, reason: 'max_delivery_failed' }; }
       const clientEmail = await notifyAssignmentEmail(order, order.clientEmail, 'client');
       const driverEmail = await notifyAssignmentEmail(order, vehicle.email, 'driver');
-      order.telegram = telegram; order.emailNotifications = { client: clientEmail, driver: driverEmail };
+      order.telegram = telegram; order.max = max; order.emailNotifications = { client: clientEmail, driver: driverEmail };
       writeOrders(orders); audit(req, actor, 'order.assign', 'order', order.id, { driverId: order.driverId, vehiclePlate: order.vehiclePlate, emailClientSent: clientEmail.sent, emailDriverSent: driverEmail.sent }); return json(res, 200, order);
     } catch { return json(res, 400, { error: 'invalid_request' }); }
   }

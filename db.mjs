@@ -57,6 +57,18 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS max_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id TEXT,
+      event_type TEXT NOT NULL,
+      chat_id TEXT,
+      status TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      sent_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -228,6 +240,15 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
         : db.prepare(`SELECT id,order_id AS orderId,event_type AS eventType,role,chat_id AS chatId,status,attempts,last_error AS lastError,sent_at AS sentAt,created_at AS createdAt,updated_at AS updatedAt FROM telegram_events ORDER BY created_at DESC LIMIT 200`).all();
       return rows;
     },
+    createMaxEvent({ orderId, eventType, chatId, status = 'pending', attempts = 0, lastError = null, sentAt = null }) {
+      const now = new Date().toISOString(); const result = db.prepare('INSERT INTO max_events(order_id,event_type,chat_id,status,attempts,last_error,sent_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)').run(orderId || null, eventType, chatId || null, status, attempts, lastError, sentAt, now, now); return this.findMaxEvent(Number(result.lastInsertRowid));
+    },
+    updateMaxEvent(id, patch) {
+      const current = this.findMaxEvent(id); if (!current) return null; const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
+      db.prepare('UPDATE max_events SET status=?,attempts=?,last_error=?,sent_at=?,updated_at=? WHERE id=?').run(next.status, next.attempts, next.lastError || null, next.sentAt || null, next.updatedAt, id); return this.findMaxEvent(id);
+    },
+    findMaxEvent(id) { return db.prepare('SELECT id,order_id AS orderId,event_type AS eventType,chat_id AS chatId,status,attempts,last_error AS lastError,sent_at AS sentAt,created_at AS createdAt,updated_at AS updatedAt FROM max_events WHERE id=?').get(id); },
+    listMaxEvents(orderId) { return (orderId ? db.prepare('SELECT id,order_id AS orderId,event_type AS eventType,status,attempts,last_error AS lastError,sent_at AS sentAt,created_at AS createdAt,updated_at AS updatedAt FROM max_events WHERE order_id=? ORDER BY created_at').all(orderId) : db.prepare('SELECT id,order_id AS orderId,event_type AS eventType,status,attempts,last_error AS lastError,sent_at AS sentAt,created_at AS createdAt,updated_at AS updatedAt FROM max_events ORDER BY created_at DESC LIMIT 200').all()); },
     createUser({ id, role, email, name, phone, passwordHash, verifiedAt, car, plate }) {
       db.prepare(`INSERT INTO users (id,role,email,full_name,phone,status,services_json,tariffs_json,password_hash,verified_at,created_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id, role, email, name, phone || null, 'Активен', '[]', '[]', passwordHash, verifiedAt || null, new Date().toISOString());
@@ -252,7 +273,7 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
       const insert = db.prepare(`INSERT INTO users (id,role,email,full_name,phone,city,status,car,plate,services_json,tariffs_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
       const now = new Date().toISOString();
       try {
-        db.exec('DELETE FROM telegram_events; DELETE FROM payments; DELETE FROM orders; DELETE FROM driver_documents; DELETE FROM vehicles; DELETE FROM users;');
+        db.exec('DELETE FROM max_events; DELETE FROM telegram_events; DELETE FROM payments; DELETE FROM orders; DELETE FROM driver_documents; DELETE FROM vehicles; DELETE FROM users;');
         for (const d of seed.drivers || []) insert.run(d.id, 'driver', d.email || null, d.name || '', d.phone || null, d.city || null, d.status || null, d.car || null, d.plate || null, JSON.stringify(d.services || []), JSON.stringify(d.tariffs || []), now);
         for (const c of seed.clients || []) insert.run(c.id, 'client', c.email || null, c.name || '', c.phone || null, c.city || null, c.status || null, null, null, '[]', '[]', now);
         const vehicle = db.prepare('INSERT OR IGNORE INTO vehicles(id,driver_id,make,model,plate,car_class,status) VALUES (?,?,?,?,?,?,?)');

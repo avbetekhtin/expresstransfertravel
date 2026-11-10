@@ -97,6 +97,10 @@ npm start
 
 При том же назначении сервер отправляет email клиенту и, если у водителя сохранён email, водителю. Результат сохраняется в `order.emailNotifications`; доставка не отменяет назначение при недоступном SMTP. Production SMTP требует `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS` и `MAIL_FROM`. Для локальной проверки формирования письма можно задать `SMTP_JSON_TRANSPORT=true`; это не доставляет письмо во внешний почтовый ящик.
 
+## MAX-бот
+
+MAX подключается отдельным секретным каналом через `MAX_BOT_TOKEN` и `MAX_CHAT_ID`; для ролей доступны `MAX_CLIENT_CHAT_ID`, `MAX_DRIVER_CHAT_ID`, `MAX_DISPATCHER_CHAT_ID`, `MAX_ADMIN_CHAT_ID`. При назначении машины и завершении поездки сервер отправляет уведомления через `POST https://platform-api.max.ru/messages`; события сохраняются в таблице `max_events`, максимум выполняется 3 попытки. Журнал staff доступен через `GET /api/max/events`. Chat ID нужно получить после сообщения боту через MAX updates API; токен из чата необходимо отозвать и выпустить новый перед установкой в окружение.
+
 События назначения и завершения записываются в таблицу `telegram_events`; доставка выполняется максимум в 3 попытки. Для раздельных уведомлений задайте `TELEGRAM_CLIENT_CHAT_ID`, `TELEGRAM_DRIVER_CHAT_ID`, `TELEGRAM_DISPATCHER_CHAT_ID`, `TELEGRAM_ADMIN_CHAT_ID`; старый `TELEGRAM_CHAT_ID` остаётся совместимым общим fallback. Staff может просматривать журнал через `GET /api/telegram/events` и повторять неудачное событие через `POST /api/telegram/events/:id/retry`.
 
 ## Маршруты и расчёт

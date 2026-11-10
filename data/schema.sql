@@ -107,6 +107,19 @@ CREATE TABLE IF NOT EXISTS telegram_events (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS max_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id TEXT,
+  event_type TEXT NOT NULL,
+  chat_id TEXT,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  sent_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
