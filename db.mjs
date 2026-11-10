@@ -108,6 +108,12 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
       return db.prepare(`SELECT id,role,email,full_name AS name,phone,city,status,car,plate,verified_at AS verifiedAt,created_at AS createdAt
         FROM users ORDER BY role, name`).all();
     },
+    findDriverVehicle(driverId, plate) {
+      return db.prepare(`SELECT u.id, u.full_name AS name, u.status, v.id AS vehicleId, v.make, v.model,
+        v.plate, v.car_class AS carClass, v.status AS vehicleStatus
+        FROM users u JOIN vehicles v ON v.driver_id=u.id
+        WHERE u.id=? AND u.role='driver' AND upper(v.plate)=upper(?)`).get(driverId, plate);
+    },
     createUser({ id, role, email, name, phone, passwordHash, verifiedAt, car, plate }) {
       db.prepare(`INSERT INTO users (id,role,email,full_name,phone,status,services_json,tariffs_json,password_hash,verified_at,created_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id, role, email, name, phone || null, 'Активен', '[]', '[]', passwordHash, verifiedAt || null, new Date().toISOString());
@@ -135,6 +141,8 @@ export function createDatabase({ dataDir, usersFile, ordersFile, platformDbFile,
         db.exec('DELETE FROM payments; DELETE FROM orders; DELETE FROM driver_documents; DELETE FROM vehicles; DELETE FROM users;');
         for (const d of seed.drivers || []) insert.run(d.id, 'driver', d.email || null, d.name || '', d.phone || null, d.city || null, d.status || null, d.car || null, d.plate || null, JSON.stringify(d.services || []), JSON.stringify(d.tariffs || []), now);
         for (const c of seed.clients || []) insert.run(c.id, 'client', c.email || null, c.name || '', c.phone || null, c.city || null, c.status || null, null, null, '[]', '[]', now);
+        const vehicle = db.prepare('INSERT OR IGNORE INTO vehicles(id,driver_id,make,model,plate,car_class,status) VALUES (?,?,?,?,?,?,?)');
+        for (const d of seed.drivers || []) { const parts = String(d.car || '').trim().split(/\s+/); if (d.car && d.plate) vehicle.run(`VEH-${d.id}`, d.id, parts.shift() || d.car, parts.join(' ') || 'автомобиль', d.plate, d.carClass || null, d.status || 'На проверке'); }
         db.exec('COMMIT');
         return this.readUsers();
       } catch (error) { db.exec('ROLLBACK'); throw error; }

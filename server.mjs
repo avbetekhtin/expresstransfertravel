@@ -257,19 +257,22 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/pay-commission')) {
     const actor = requireRole(req, res, ['client']); if (!actor) return;
     const orderId = req.url.split('/')[3]; const data = await body(req); const orders = readOrders(); const order = orders.find(item => item.id === orderId);
-    if (!order || order.status !== 'Машина назначена' || Date.now() > Date.parse(order.paymentDeadline)) return json(res, 409, { error: 'payment_window_expired' });
+    if (!order || order.clientEmail !== actor.email) return json(res, 403, { error: 'order_owner_required' });
+    if (order.status !== 'Машина назначена' || Date.now() > Date.parse(order.paymentDeadline)) return json(res, 409, { error: 'payment_window_expired' });
     Object.assign(order, { paymentStatus: 'Комиссия оплачена', paymentMethod: data.method === 'qr' ? 'QR-код' : 'Карта', commissionPaidAt: new Date().toISOString(), status: 'Подтверждён клиентом' }); writeOrders(orders); return json(res, 200, order);
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/start')) {
     const actor = requireRole(req, res, ['driver']); if (!actor) return;
     const orderId = req.url.split('/')[3]; const orders = readOrders(); const order = orders.find(item => item.id === orderId);
-    if (!order || order.status !== 'Подтверждён клиентом' || order.paymentStatus !== 'Комиссия оплачена') return json(res, 409, { error: 'order_not_ready_to_start' });
+    if (!order || order.driverId !== actor.id) return json(res, 403, { error: 'assigned_driver_required' });
+    if (order.status !== 'Подтверждён клиентом' || order.paymentStatus !== 'Комиссия оплачена') return json(res, 409, { error: 'order_not_ready_to_start' });
     Object.assign(order, { status: 'В поездке', tripStartedAt: new Date().toISOString() }); writeOrders(orders); return json(res, 200, order);
   }
   if (req.method === 'POST' && req.url.startsWith('/api/orders/') && req.url.endsWith('/complete')) {
     const actor = requireRole(req, res, ['driver']); if (!actor) return;
     const orderId = req.url.split('/')[3]; const data = await body(req); const orders = readOrders(); const order = orders.find(item => item.id === orderId);
-    if (!order || order.status !== 'В поездке') return json(res, 409, { error: 'order_not_in_trip' });
+    if (!order || order.driverId !== actor.id) return json(res, 403, { error: 'assigned_driver_required' });
+    if (order.status !== 'В поездке') return json(res, 409, { error: 'order_not_in_trip' });
     Object.assign(order, { status: 'Завершён', tripCompletedAt: new Date().toISOString(), report: String(data.report || 'Поездка завершена без замечаний') });
     try { order.telegramReport = await notifyTripReport(order); } catch { order.telegramReport = { sent: false, reason: 'telegram_delivery_failed' }; }
     writeOrders(orders); return json(res, 200, order);
@@ -280,7 +283,11 @@ const server = http.createServer(async (req, res) => {
       const orderId = req.url.split('/')[3]; const data = await body(req); const orders = readOrders();
       const order = orders.find(item => item.id === orderId);
       if (!order || !data.vehicle || !data.vehiclePlate) return json(res, 400, { error: 'order_or_vehicle_plate_not_found' });
-      Object.assign(order, { status: 'Машина назначена', paymentStatus: 'Ожидает оплаты комиссии', paymentMethods: ['Карта', 'QR-код'], paymentDeadline: new Date(Date.now() + 10 * 60_000).toISOString(), vehicle: String(data.vehicle), vehiclePlate: String(data.vehiclePlate).trim().toUpperCase(), driverId: data.driverId || '', driverName: data.driverName || '', assignedAt: new Date().toISOString() });
+      if (!['Новый', 'Принят водителем'].includes(order.status)) return json(res, 409, { error: 'order_not_assignable' });
+      const driverId = String(data.driverId || '').trim(); const vehiclePlate = String(data.vehiclePlate).trim().toUpperCase();
+      const vehicle = database.findDriverVehicle(driverId, vehiclePlate);
+      if (!vehicle || `${vehicle.make} ${vehicle.model}`.trim().toLowerCase() !== String(data.vehicle).trim().toLowerCase()) return json(res, 422, { error: 'driver_vehicle_plate_mismatch' });
+      Object.assign(order, { status: 'Машина назначена', paymentStatus: 'Ожидает оплаты комиссии', paymentMethods: ['Карта', 'QR-код'], paymentDeadline: new Date(Date.now() + 10 * 60_000).toISOString(), vehicle: `${vehicle.make} ${vehicle.model}`, vehiclePlate, driverId: vehicle.id, driverName: vehicle.name, assignedAt: new Date().toISOString() });
       let telegram = { sent: false, reason: 'telegram_not_configured' };
       try { telegram = await notifyTelegram(order); } catch (error) { console.error(error); telegram = { sent: false, reason: 'telegram_delivery_failed' }; }
       order.telegram = telegram; writeOrders(orders); return json(res, 200, order);
